@@ -99,4 +99,4 @@ molecular_reference_files = os.path.join(code_folder_path, 'files', 'molecular_r
 # per-run/per-machine AiiDA-tracked directory) so reports always land in one
 # fixed, predictable place next to the code -- e.g.
 # /data/hossein/platform/reports if uvsib lives in /data/hossein/platform/uvsib.
-REPORTS_DIR = os.path.join(os.path.dirname(uvsib_directory), 'reports')
+REPORTS_DIR = "/opt/uvsib/backend/uploads/public/result/" #os.path.join(os.path.dirname(uvsib_directory), 'reports')

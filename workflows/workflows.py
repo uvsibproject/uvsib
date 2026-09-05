@@ -23,7 +23,7 @@ def check_valid(reaction, reaction_path):
     # each workchain) so this gate cannot drift out of sync again — a stale
     # hand-copied list here is what blocked ORR/HER/NRR/CER and the newer
     # CO2RR chains. OER has no pathway dict; 'default' is its only route.
-    implemented_reactions = {'OER': ['default'],
+    implemented_reactions = {'OER': ['4e'],
                              'HER': sorted(HER_PATHWAYS),
                              'ORR': sorted(ORR_PATHWAYS),
                              'CER': sorted(CER_PATHWAYS),
@@ -126,7 +126,7 @@ def add_from_frontend(dict_from_frontend_list):
         submit_mainworkchain(chemical_formula=chemical_formula, chemical_systems=new_chemsys,
                              reaction=reaction, reaction_path=reaction_path,
                              similarities=similars, sqs=sqs)
-        update_dbfrontend()
+#        update_dbfrontend()
 
 def reset_orphaned_chemsys():
     """Delete DBChemsys rows stuck not-"Ready" from a crashed/killed workflow.
@@ -272,7 +272,7 @@ def reset_orphaned_compositions():
 
 def update_dbfrontend():
     """Updateing DBFrontend status"""
-    for status in ["Created", "Running", "Failed"]:
+    for status in ["Pending", "Created", "Running", "Failed"]:
         db_fe_rows = query_by_columns(DBFrontend, {"status": status})
         for fe_row in db_fe_rows:
             db_c_row = query_by_columns(DBComposition,{"composition": fe_row.composition})[0]
