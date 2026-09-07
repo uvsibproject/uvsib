@@ -100,3 +100,10 @@ molecular_reference_files = os.path.join(code_folder_path, 'files', 'molecular_r
 # fixed, predictable place next to the code -- e.g.
 # /data/hossein/platform/reports if uvsib lives in /data/hossein/platform/uvsib.
 REPORTS_DIR = "/opt/uvsib/backend/uploads/public/result/" #os.path.join(os.path.dirname(uvsib_directory), 'reports')
+
+# Public URL prefix at which the backend (app/main.py) serves the contents of
+# REPORTS_DIR. REPORTS_DIR is the backend's <UPLOAD_ROOT>/public/result/, and its
+# StaticFiles mount maps "/uploads" -> "<UPLOAD_ROOT>/public", so a report
+# written to REPORTS_DIR/<folder>/report.html is served at
+# REPORTS_URL_PREFIX/<folder>/report.html. Keep the two in sync.
+REPORTS_URL_PREFIX = "/uploads/result"

@@ -4,7 +4,8 @@ from aiida.plugins import WorkflowFactory
 from aiida.engine import WorkChain, if_, while_
 from aiida_pythonjob import PythonJob, prepare_pythonjob_inputs
 from uvsib.db.tables import DBComposition, DBSurfaceMLAdsorbate
-from uvsib.db.utils import update_row, query_by_columns, update_step_status_path
+from uvsib.db.utils import (update_row, query_by_columns, update_step_status_path,
+                            update_json_path)
 from uvsib.workchains.pythonjob_inputs import wait_sleep
 from uvsib.workflows import settings
 
@@ -618,6 +619,17 @@ class MainWorkChain(WorkChain):
         except Exception:
             update_step_status_path(DBComposition, row.uuid, path, "Failed")
             raise
+
+        # Record the browser URL of the report BEFORE marking the step Done, so
+        # any update_dbfrontend() sweep that sees "Done" also finds the link to
+        # copy into the db_frontend row's ``result`` for this (reaction, path).
+        report_url = f"{settings.REPORTS_URL_PREFIX}/{folder}/report.html"
+        try:
+            update_json_path(DBComposition, row.uuid, "attributes",
+                             ["reports", reaction, reaction_path], report_url)
+        except Exception as exc:
+            self.report(f"WARNING: could not record report URL for "
+                        f"{self.ctx.chemical_formula} ({reaction}/{reaction_path}): {exc}")
 
         update_step_status_path(DBComposition, row.uuid, path, "Done")
         self.report(f"Pipeline report for {self.ctx.chemical_formula} "

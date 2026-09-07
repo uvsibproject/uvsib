@@ -384,27 +384,32 @@ def update_row(table_class, uuid_value, columns_values):
 
 
 _SAFE_STEP_KEY = re.compile(r"^[A-Za-z0-9_:.\-]+$")
+_SAFE_JSON_COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def update_step_status_path(table_class, uuid_value, path, value):
-    """Atomically set a nested key in the ``step_status`` JSONB column.
+def update_json_path(table_class, uuid_value, column, path, value):
+    """Atomically set a nested key in a JSONB ``column`` of the row picked by
+    ``uuid``.
 
-    Sets ``step_status`` at ``path`` (a list of keys, e.g.
+    Sets ``column`` at ``path`` (a list of keys, e.g.
     ``["adsorbates", reaction, reaction_path]``) to the string ``value``,
     creating any missing intermediate objects and PRESERVING sibling keys at
     every level. Implemented as a single nested ``jsonb_set`` UPDATE, so it is
     safe under concurrent updates of the SAME row by parallel sibling
     workchains -- each writes only its own leaf instead of overwriting the whole
-    column (which a read-modify-write of the JSONB would do).
+    column (which a read-modify-write of the JSONB would do). A NULL column is
+    treated as ``{}``.
 
-    Keys are restricted to a safe identifier charset; ``value`` must be a
-    string (the step states used here are 'Running'/'Done'/'Failed').
+    ``column`` and the keys are restricted to a safe identifier charset;
+    ``value`` must be a string.
     """
     if not path:
         raise ValueError("path must be a non-empty list of keys")
+    if not _SAFE_JSON_COLUMN.match(column):
+        raise ValueError(f"unsafe column name: {column!r}")
     for key in path:
         if not _SAFE_STEP_KEY.match(key):
-            raise ValueError(f"unsafe step_status key: {key!r}")
+            raise ValueError(f"unsafe {column} key: {key!r}")
     if not isinstance(value, str):
         raise ValueError("value must be a string")
 
@@ -417,18 +422,25 @@ def update_step_status_path(table_class, uuid_value, path, value):
         parent = path[:i]
         if parent:
             parent_arr = "'{" + ",".join(parent) + "}'::text[]"
-            existing = f"COALESCE(step_status #> {parent_arr}, '{{}}'::jsonb)"
+            existing = f"COALESCE({column} #> {parent_arr}, '{{}}'::jsonb)"
         else:
-            existing = "COALESCE(step_status, '{}'::jsonb)"
+            existing = f"COALESCE({column}, '{{}}'::jsonb)"
         expr = f"jsonb_set({existing}, {leaf_arr}, {expr}, true)"
 
     query = text(
         f"UPDATE {table_class.__tablename__} "
-        f"SET step_status = {expr} WHERE uuid = :uuid"
+        f"SET {column} = {expr} WHERE uuid = :uuid"
     )
     with get_session() as session:
         session.execute(query, {"uuid": str(uuid_value), "val": value})
         session.commit()
+
+
+def update_step_status_path(table_class, uuid_value, path, value):
+    """Atomically set a nested key in the ``step_status`` JSONB column
+    (thin wrapper around :func:`update_json_path`; step states used here are
+    'Running'/'Done'/'Failed')."""
+    update_json_path(table_class, uuid_value, "step_status", path, value)
 
 def add_row(table_class, rows_data):
     """
