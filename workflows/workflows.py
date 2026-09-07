@@ -31,25 +31,16 @@ def check_valid(reaction, reaction_path):
                              'NRR': sorted(NRR_PATHWAYS),
                              'CO2RR': sorted(CO2RR_PATHWAYS),
                              'NOXRR': sorted(NOXRR_PATHWAYS)}
-    # Normalize case so 'battery'/'Li'/'li' all work, and so one canonical
-    # spelling reaches the DB rows, step_status keys, and workchain labels.
     reaction = reaction.strip().upper()
     if reaction not in implemented_reactions:
         raise NotImplementedError(f"Reaction {reaction} not implemented.")
-    if reaction == 'BATTERY':
-        reaction_path = reaction_path.strip().capitalize()   # ion symbol: li -> Li
-    else:
-        reaction_path = reaction_path.strip().lower()
+    reaction_path = reaction_path.strip().lower()
     if reaction_path not in implemented_reactions[reaction]:
         raise NotImplementedError(f"Path {reaction_path} not implemented for {reaction}.")
     return reaction, reaction_path
 
 def add_from_frontend(dict_from_frontend_list):
     """Process frontend submissions and update the database accordingly."""
-    # Self-heal state left "Running" forever by a crashed/killed workflow
-    # (see reset_orphaned_chemsys/reset_orphaned_compositions) before the
-    # active/ran_before checks below rely on it, so a retry isn't blocked by
-    # a crash the periodic sweep hasn't gotten to yet.
     reset_orphaned_chemsys()
     reset_orphaned_compositions()
 
@@ -62,7 +53,6 @@ def add_from_frontend(dict_from_frontend_list):
 
     for entry in dict_from_frontend_list:
         chemical_formula = Composition(entry["chemical_formula"]).reduced_formula
-        user = entry["user"]
         reaction = entry["reaction"]
         reaction_path = entry["reaction_path"]
 
@@ -73,23 +63,14 @@ def add_from_frontend(dict_from_frontend_list):
         else:
             similars = {}
 
-        # The SQS request payload (parent structure, sublattices, composition
-        # grid, surfaces, defects) rides through verbatim; {} means a normal
-        # (non-SQS) submission. submit_mainworkchain wraps it in an aiida Dict.
         sqs = entry.get("sqs", {})
 
         check_valid(reaction, reaction_path)
 
-        existing_frontend_rows = query_by_columns(DBFrontend,{"composition": chemical_formula})
-        user_already_exists = any(row.username == user for row in existing_frontend_rows)
-
-        if not user_already_exists:
-            add_row(DBFrontend, {
-                "username": user,
-                "composition": chemical_formula,
-                "reaction": reaction,
-                "reaction_path": reaction_path}
-            )
+        # db_frontend is owned by the backend: it writes the submission rows this
+        # loop consumes, and platform only writes progress back via
+        # update_dbfrontend(). Every entry here already has its row, so there is
+        # nothing to insert.
 
         # check if a composition is already processed
         existing_composition = query_by_columns(DBComposition, {"composition": chemical_formula})
