@@ -83,7 +83,7 @@ def main():
     parser.add_argument("--keep", type=int, default=60)
     # GNN screen (reuses the relaxer calculator factory)
     parser.add_argument("--screen", default="none",
-                        help="MLIP tag for the energy screen (MACE/uPET/UMA/MatterSim) or 'none'")
+                        help="MLIP tag for the energy screen (MACE/uPET/UMA/MatterSim/SevenNet) or 'none'")
     parser.add_argument("--model", default=None)
     parser.add_argument("--model_path", default=None)
     parser.add_argument("--task_name", default=None)
