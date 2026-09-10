@@ -1,7 +1,7 @@
 """ASE calculator factory used by relax / face_build / adsorbates / mh.
 
 Shipped as a sidecar alongside each ``aiida.py`` script (see the CalcJob
-``prepare_for_submission`` of mace / mattersim / upet / uma / sevennet /
+``prepare_for_submission`` of mace / mattersim / upet / uma / sevennet / grace /
 minimahopping). Each script does ``from _calculators import make_calculator``
 and the workchain controls the backend + UMA task head via ``--ML_model`` and
 ``--task_name``.
@@ -22,6 +22,17 @@ _SEVENNET_MODELS = ("7net-0", "7net-l3i5", "7net-mf-ompa", "7net-omat", "7net-om
 # ``--task_name`` when set to a real value.
 _SEVENNET_MODALS = ("mpa", "omat24")
 
+# GRACE (https://github.com/ICAMS/grace-tensorpotential) foundation-model
+# aliases accepted by ``tensorpotential.calculator.grace_fm``. A local
+# TensorFlow SavedModel directory passed via ``--model_path`` overrides these
+# (loaded through ``TPCalculator``); the list is informational only -- GRACE
+# ships more aliases and pulls the weights from HuggingFace on first use.
+_GRACE_MODELS = (
+    "GRACE-1L-OMAT", "GRACE-2L-OMAT", "GRACE-3L-OMAT-large",
+    "GRACE-1L-OAM", "GRACE-2L-OAM",
+    "GRACE-2L-SMAX-OMAT-M", "GRACE-2L-SMAX-OMAT-L",
+)
+
 def make_calculator(ml_model, *, model=None, model_path=None, device="cuda",
                     task_name=None):
     """Build an ASE calculator from the workflow-supplied backend identifier.
@@ -31,16 +42,19 @@ def make_calculator(ml_model, *, model=None, model_path=None, device="cuda",
     ml_model : str
         Backend tag passed in via ``--ML_model``. Recognised tokens (substring
         match, matching the workchain dispatch):
-        ``MACE``, ``uPET``, ``MatterSim``, ``UMA``, ``SevenNet``.
+        ``MACE``, ``uPET``, ``MatterSim``, ``UMA``, ``SevenNet``, ``GRACE``.
     model : str | None
         HuggingFace-style model name / pretrained keyword (``--model``); used by
-        uPET, UMA and SevenNet (e.g. ``7net-0``, ``7net-mf-ompa``).
+        uPET, UMA, SevenNet (e.g. ``7net-0``, ``7net-mf-ompa``) and GRACE
+        (e.g. ``GRACE-2L-OMAT``, ``GRACE-2L-OAM``).
     model_path : str | None
         Local path to a checkpoint (``--model_path``); used by MACE, MatterSim
         and SevenNet. For SevenNet an existing path takes precedence over the
-        ``model`` keyword.
+        ``model`` keyword; for GRACE an existing path is loaded as a TensorFlow
+        SavedModel directory via ``TPCalculator``.
     device : str
-        Torch device string.
+        Torch device string. GRACE (TensorFlow) has no device argument -- a
+        ``cpu`` value only hides the GPUs via ``CUDA_VISIBLE_DEVICES``.
     task_name : str | None
         UMA task head (must be one of ``{_UMA_TASKS}``), or the SevenNet
         ``modal`` selector for multi-fidelity checkpoints (e.g. ``mpa``,
@@ -87,6 +101,17 @@ def make_calculator(ml_model, *, model=None, model_path=None, device="cuda",
             kwargs["modal"] = task_name
         return SevenNetCalculator(checkpoint, **kwargs)
 
+    if "GRACE" in ml_model:
+        # GRACE is TensorFlow-based and picks its device from the environment;
+        # honour a ``cpu`` request by hiding the GPUs before TF is imported.
+        if device and str(device).lower().startswith("cpu"):
+            os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+        if model_path and os.path.exists(model_path):
+            from tensorpotential.calculator import TPCalculator
+            return TPCalculator(model_path)
+        from tensorpotential.calculator import grace_fm
+        return grace_fm(model or "GRACE-2L-OMAT")
+
     raise ValueError(
         f"Unknown ML_model '{ml_model}'. Expected one of: "
-        "MACE, uPET, UMA, MatterSim, SevenNet.")
+        "MACE, uPET, UMA, MatterSim, SevenNet, GRACE.")

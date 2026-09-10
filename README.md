@@ -46,7 +46,8 @@ AiiDA calculation, parser, and workchain integrations are provided for several m
 - MACE;
 - uPET;
 - UMA;
-- SevenNet.
+- SevenNet;
+- GRACE.
 
 These models can be used for rapid structure relaxation and screening before more expensive first-principles verification.
 
@@ -148,8 +149,8 @@ holding only what that one runner (`codes/files/*.py`) needs. These are **not** 
   into the cache; compute nodes cannot download them at run time.
 
 **ML interatomic potentials** (one env per backend): `mattersim`, `mace-torch` (MACE), `upet` (uPET),
-`fairchem` (UMA), `sevenn` (SevenNet) — each with its own `torch` build; plus `minimahopping` for the
-minima-hopping runner.
+`fairchem` (UMA), `sevenn` (SevenNet) — each with its own `torch` build; `tensorpotential` (GRACE,
+TensorFlow-based); plus `minimahopping` for the minima-hopping runner.
 
 **Generative models**: `mattergen`, the GNoME SAPS runner (pymatgen only), and `diffcsp` (its upstream
 repo checkout, `torch`, `pytorch-lightning`, `hydra-core`, …).
