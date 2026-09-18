@@ -348,8 +348,8 @@ class MainWorkChain(WorkChain):
 
         row = self.ctx.dbcomposition_row
         # update row status in DBComposition table
-        row.step_status.update({"pd_ml": "Running"})
-        update_row(DBComposition, row.uuid,{"status": "Running", "step_status": row.step_status})
+        update_step_status_path(DBComposition, row.uuid, ["pd_ml"], "Running")
+        update_row(DBComposition, row.uuid, {"status": "Running"})
         builder = self._construct_pd_ml_builder()
         future = self.submit(builder)
         self.to_context(**{"pd_ml": future})
@@ -364,14 +364,14 @@ class MainWorkChain(WorkChain):
         row = self.ctx.dbcomposition_row
         if not pd_ml_wch.is_finished_ok:
             # update row status in DBComposition table
-            row.step_status.update({"pd_ml": "Failed"})
-            update_row(DBComposition, row.uuid,{"status": "Failed", "step_status": row.step_status})
+            update_step_status_path(DBComposition, row.uuid, ["pd_ml"], "Failed")
+            update_row(DBComposition, row.uuid, {"status": "Failed"})
             self.report("PhaseDiagramML WorkChain failed")
             return self.exit_codes.ERROR_CALCULATION_FAILED
 
         # update row status in DBComposition table
-        row.step_status.update({"pd_ml": "Done"})
-        update_row(DBComposition, row.uuid,{"status": "Running", "step_status": row.step_status})
+        update_step_status_path(DBComposition, row.uuid, ["pd_ml"], "Done")
+        update_row(DBComposition, row.uuid, {"status": "Running"})
 
     def pd_verification(self):
         """Running PDVerificationWorkChain"""
@@ -385,8 +385,8 @@ class MainWorkChain(WorkChain):
 
         row = self.ctx.dbcomposition_row
         # update row status in DBComposition table
-        row.step_status.update({"pd_verification": "Running"})
-        update_row(DBComposition, row.uuid,{"status": "Running", "step_status": row.step_status})
+        update_step_status_path(DBComposition, row.uuid, ["pd_verification"], "Running")
+        update_row(DBComposition, row.uuid, {"status": "Running"})
         builder = self._construct_pd_verification_builder()
         future = self.submit(builder)
         self.to_context(**{"pdverification": future})
@@ -402,14 +402,14 @@ class MainWorkChain(WorkChain):
 
         if not pd_ver_wch.is_finished_ok:
             # update row status in DBComposition table
-            row.step_status.update({"pd_verification": "Failed"})
-            update_row(DBComposition, row.uuid,{"status": "Failed","step_status": row.step_status})
+            update_step_status_path(DBComposition, row.uuid, ["pd_verification"], "Failed")
+            update_row(DBComposition, row.uuid, {"status": "Failed"})
             self.report("PDVerification WorkChain failed")
             return self.exit_codes.ERROR_CALCULATION_FAILED
 
         # update row status in DBComposition table
-        row.step_status.update({"pd_verification": "Done"})
-        update_row(DBComposition, row.uuid,{"status": "Running","step_status": row.step_status})
+        update_step_status_path(DBComposition, row.uuid, ["pd_verification"], "Done")
+        update_row(DBComposition, row.uuid, {"status": "Running"})
 
     def synthesizability(self):
         """Running SynthesizabilityWorkChain (classify all generated structures)"""
@@ -422,8 +422,8 @@ class MainWorkChain(WorkChain):
             return
 
         row = self.ctx.dbcomposition_row
-        row.step_status.update({"synthesizability": "Running"})
-        update_row(DBComposition, row.uuid, {"status": "Running", "step_status": row.step_status})
+        update_step_status_path(DBComposition, row.uuid, ["synthesizability"], "Running")
+        update_row(DBComposition, row.uuid, {"status": "Running"})
         builder = self._construct_synthesizability_builder()
         future = self.submit(builder)
         self.to_context(**{"synthesizability": future})
@@ -437,13 +437,13 @@ class MainWorkChain(WorkChain):
         wch = self.ctx.synthesizability
         row = self.ctx.dbcomposition_row
         if not wch.is_finished_ok:
-            row.step_status.update({"synthesizability": "Failed"})
-            update_row(DBComposition, row.uuid, {"status": "Failed", "step_status": row.step_status})
+            update_step_status_path(DBComposition, row.uuid, ["synthesizability"], "Failed")
+            update_row(DBComposition, row.uuid, {"status": "Failed"})
             self.report("Synthesizability WorkChain failed")
             return self.exit_codes.ERROR_CALCULATION_FAILED
 
-        row.step_status.update({"synthesizability": "Done"})
-        update_row(DBComposition, row.uuid, {"status": "Running", "step_status": row.step_status})
+        update_step_status_path(DBComposition, row.uuid, ["synthesizability"], "Done")
+        update_row(DBComposition, row.uuid, {"status": "Running"})
 
     def sqs(self):
         """Running SQS WorkChain"""
@@ -457,8 +457,8 @@ class MainWorkChain(WorkChain):
 
         row = self.ctx.dbcomposition_row
         # update row status in DBComposition table
-        row.step_status.update({"sqs": "Running"})
-        update_row(DBComposition, row.uuid,{"status": "Running", "step_status": row.step_status})
+        update_step_status_path(DBComposition, row.uuid, ["sqs"], "Running")
+        update_row(DBComposition, row.uuid, {"status": "Running"})
         builder = self._construct_sqs_builder(self.ctx.sqs_request)
         future = self.submit(builder)
         self.to_context(**{"sqs": future})
@@ -473,14 +473,14 @@ class MainWorkChain(WorkChain):
         row = self.ctx.dbcomposition_row
         if not wch.is_finished_ok:
             # update row status in DBComposition table
-            row.step_status.update({"sqs": "Failed"})
-            update_row(DBComposition, row.uuid,{"status": "Failed", "step_status": row.step_status})
+            update_step_status_path(DBComposition, row.uuid, ["sqs"], "Failed")
+            update_row(DBComposition, row.uuid, {"status": "Failed"})
             self.report("SQS WorkChain failed")
             return self.exit_codes.ERROR_CALCULATION_FAILED
 
         # update row status in DBComposition table
-        row.step_status.update({"sqs": "Done"})
-        update_row(DBComposition, row.uuid,{"status": "Running", "step_status": row.step_status})
+        update_step_status_path(DBComposition, row.uuid, ["sqs"], "Done")
+        update_row(DBComposition, row.uuid, {"status": "Running"})
 
     def surface_builder(self):
         """Running SurfaceBuilderWorkChain"""
@@ -493,8 +493,8 @@ class MainWorkChain(WorkChain):
             return
 
         row = self.ctx.dbcomposition_row
-        row.step_status.update({"surface_builder": "Running"})
-        update_row(DBComposition, row.uuid,{"status": "Running", "step_status": row.step_status})
+        update_step_status_path(DBComposition, row.uuid, ["surface_builder"], "Running")
+        update_row(DBComposition, row.uuid, {"status": "Running"})
         builder = self._construct_surface_builder()
         future = self.submit(builder)
         self.to_context(**{"surface_builder": future})
@@ -508,13 +508,13 @@ class MainWorkChain(WorkChain):
         wch = self.ctx.surface_builder
         row = self.ctx.dbcomposition_row
         if not wch.is_finished_ok:
-            row.step_status.update({"surface_builder": "Failed"})
-            update_row(DBComposition, row.uuid,{"status": "Failed", "step_status": row.step_status})
+            update_step_status_path(DBComposition, row.uuid, ["surface_builder"], "Failed")
+            update_row(DBComposition, row.uuid, {"status": "Failed"})
             self.report("SurfaceBuilder WorkChain failed")
             return self.exit_codes.ERROR_CALCULATION_FAILED
 
-        row.step_status.update({"surface_builder": "Done"})
-        update_row(DBComposition, row.uuid,{"status": "Running", "step_status": row.step_status})
+        update_step_status_path(DBComposition, row.uuid, ["surface_builder"], "Done")
+        update_row(DBComposition, row.uuid, {"status": "Running"})
 
     def adsorbates(self):
         """Running AdsorbatesWorkChain"""

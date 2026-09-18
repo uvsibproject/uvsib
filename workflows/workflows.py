@@ -12,18 +12,12 @@ from uvsib.workflows import settings
 
 
 def check_valid(reaction, reaction_path):
-    # BATTERY is the bulk (deintercalation) pathway: the "path" is the working
-    # ion, and the run skips surface builder + adsorbates (see docs/batteries.md)
     from uvsib.workchains.cer import CER_PATHWAYS
     from uvsib.workchains.co2rr import CO2RR_PATHWAYS
     from uvsib.workchains.her import HER_PATHWAYS
     from uvsib.workchains.noxrr import NOXRR_PATHWAYS
     from uvsib.workchains.nrr import NRR_PATHWAYS
     from uvsib.workchains.orr import ORR_PATHWAYS
-    # Path lists come from the single source of truth (the *_PATHWAYS dict of
-    # each workchain) so this gate cannot drift out of sync again — a stale
-    # hand-copied list here is what blocked ORR/HER/NRR/CER and the newer
-    # CO2RR chains. OER has no pathway dict; 'default' is its only route.
     implemented_reactions = {'OER': ['4e'],
                              'HER': sorted(HER_PATHWAYS),
                              'ORR': sorted(ORR_PATHWAYS),
@@ -31,83 +25,144 @@ def check_valid(reaction, reaction_path):
                              'NRR': sorted(NRR_PATHWAYS),
                              'CO2RR': sorted(CO2RR_PATHWAYS),
                              'NOXRR': sorted(NOXRR_PATHWAYS)}
-    reaction = reaction.strip().upper()
     if reaction not in implemented_reactions:
         raise NotImplementedError(f"Reaction {reaction} not implemented.")
-    reaction_path = reaction_path.strip().lower()
     if reaction_path not in implemented_reactions[reaction]:
         raise NotImplementedError(f"Path {reaction_path} not implemented for {reaction}.")
-    return reaction, reaction_path
+
+_ACTIVE_STATES = ["created", "running", "waiting"]
+
+
+def _sibling_chain_not_started(chemical_formula, own_label):
+    """True if another MainWorkChain for this composition is active but has not
+    yet claimed any shared step (pd_ml, surface_builder, ...).
+
+    Two reactions on one composition that start together both see the shared
+    steps as neither Running nor Done, so both would run them (duplicate work,
+    and their whole-row step_status writes race). The follower is therefore
+    deferred -- left Pending -- until the pioneer has marked a shared step
+    Running/Done, after which main.py's should_wait_*/_step_done gates work.
+    """
+    try:
+        active_labels = {
+            label for (label,) in QueryBuilder().append(
+                WorkChainNode,
+                filters={"label": {"like": f"CatalystChain % on {chemical_formula}"},
+                         "attributes.process_state": {"in": _ACTIVE_STATES}},
+                project=["label"],
+            ).all()
+        }
+    except Exception:
+        return False        # can't tell -> don't block submission
+    active_labels.discard(own_label)
+    if not active_labels:
+        return False
+    rows = query_by_columns(DBComposition, {"composition": chemical_formula})
+    step_status = (rows[0].step_status if rows else None) or {}
+    return not any(step_status.get(k) in ("Running", "Done") for k in _SHARED_STEP_KEYS)
+
 
 def add_from_frontend(dict_from_frontend_list):
     """Process frontend submissions and update the database accordingly."""
     reset_orphaned_chemsys()
     reset_orphaned_compositions()
 
-    # Count reactions per composition so we only gate (wait) when there are
-    # follower reactions that would benefit from reusing the shared steps.
-    reactions_per_comp = {}
-    for e in dict_from_frontend_list:
-        comp = Composition(e["chemical_formula"]).reduced_formula
-        reactions_per_comp[comp] = reactions_per_comp.get(comp, 0) + 1
-
     for entry in dict_from_frontend_list:
-        chemical_formula = Composition(entry["chemical_formula"]).reduced_formula
-        reaction = entry["reaction"]
-        reaction_path = entry["reaction_path"]
+        entry_uuid = entry.get("uuid")
 
-        retry = entry["retry"] if "retry" in entry else False
-
-        if "similarities" in entry:
-            similars = entry['similarities']
-        else:
-            similars = {}
-
-        sqs = entry.get("sqs", {})
-
-        check_valid(reaction, reaction_path)
-
-        # db_frontend is owned by the backend: it writes the submission rows this
-        # loop consumes, and platform only writes progress back via
-        # update_dbfrontend(). Every entry here already has its row, so there is
-        # nothing to insert.
-
-        # check if a composition is already processed
-        existing_composition = query_by_columns(DBComposition, {"composition": chemical_formula})
-        if not existing_composition:
-            add_row(DBComposition, {"composition": chemical_formula})
-
-        # only new chemical systems
-        _, new_chemsys = get_chemical_systems(chemical_formula)
-        for chemsys in new_chemsys:
-            add_row(DBChemsys, {"chemsys": chemsys})
-
-        # (a) already in flight -> an active MainWorkChain carries this label;
-        # (b) failed + no retry  -> a terminated MainWorkChain carries this label.
-        # Label must match launch_calculations.get_inputs_and_processclass_from_extras.
-        label = f"CatalystChain {reaction}:{reaction_path} on {chemical_formula}"
+        # Phase 1: input validation only (no DB/AiiDA calls). A failure here is
+        # a property of the submission itself, so reject this row permanently
+        # instead of letting it crash every tick and block everyone else.
         try:
-            active = QueryBuilder().append(
-                WorkChainNode,
-                filters={"label": label,
-                         "attributes.process_state": {"in": ["created", "running", "waiting"]}},
-            ).count()
-        except Exception:
-            active = 0
-        if active:
+            chemical_formula = Composition(entry["chemical_formula"]).reduced_formula
+            reaction = entry["reaction"]
+            reaction_path = entry["reaction_path"]
+            check_valid(reaction, reaction_path)
+        except Exception as exc:
+            print(f"add_from_frontend: rejected entry {entry_uuid or entry}: {exc}")
+            if entry_uuid is not None:
+                try:
+                    update_row(DBFrontend, entry_uuid,
+                               {"status": "Failed", "result": f"Rejected: {exc}"})
+                except Exception as write_exc:
+                    print(f"add_from_frontend: could not mark {entry_uuid} Failed: {write_exc}")
             continue
-        if not retry:
-            ran_before = QueryBuilder().append(
-                WorkChainNode,
-                filters={"label": label,
-                         "attributes.process_state": {"in": ["finished", "excepted", "killed"]}},
-            ).count()
-            if ran_before:        # ran before without a result row -> failed
+
+        # Phase 2: DB / AiiDA / submission. Errors here can be transient
+        # (RabbitMQ or DB hiccup), so leave the row Pending to retry next tick.
+        try:
+            retry = entry["retry"] if "retry" in entry else False
+
+            if "similarities" in entry:
+                similars = entry['similarities']
+            else:
+                similars = {}
+
+            sqs = entry.get("sqs", {})
+
+            # check if a composition is already processed
+            existing_composition = query_by_columns(DBComposition, {"composition": chemical_formula})
+            if not existing_composition:
+                add_row(DBComposition, {"composition": chemical_formula})
+
+            # only new chemical systems
+            _, new_chemsys = get_chemical_systems(chemical_formula)
+            for chemsys in new_chemsys:
+                add_row(DBChemsys, {"chemsys": chemsys})
+
+            # (a) already in flight -> an active MainWorkChain carries this label;
+            # (b) failed + no retry  -> a terminated MainWorkChain carries this label.
+            # Label must match launch_calculations.get_inputs_and_processclass_from_extras.
+            label = f"CatalystChain {reaction}:{reaction_path} on {chemical_formula}"
+            try:
+                active = QueryBuilder().append(
+                    WorkChainNode,
+                    filters={"label": label,
+                             "attributes.process_state": {"in": ["created", "running", "waiting"]}},
+                ).count()
+            except Exception:
+                active = 0
+            if active:
+                continue
+            if not retry:
+                ran_before = QueryBuilder().append(
+                    WorkChainNode,
+                    filters={"label": label,
+                             "attributes.process_state": {"in": ["finished", "excepted", "killed"]}},
+                ).count()
+                if ran_before:        # ran before without a result row -> failed
+                    continue
+
+            # Pioneer/follower gate: don't start a second chain on this
+            # composition until the first one has claimed the shared steps.
+            # The row stays Pending and is retried on the next tick.
+            if _sibling_chain_not_started(chemical_formula, label):
+                print(f"add_from_frontend: deferring {reaction}:{reaction_path} on "
+                      f"{chemical_formula} until the running sibling chain has started")
                 continue
 
-        submit_mainworkchain(chemical_formula=chemical_formula, chemical_systems=new_chemsys,
-                             reaction=reaction, reaction_path=reaction_path,
-                             similarities=similars, sqs=sqs)
+            # A WorkChain is about to actually retry any shared/pioneer step
+            # (should_run_* only skips a "Done" step, so a "Failed" one gets
+            # re-run) -- but that re-run only flips step_status to "Running"
+            # once the new chain reaches it, which can lag this submission by
+            # a full daemon cycle. Clear stale "Failed" shared flags here, at
+            # the point retry is guaranteed, so update_dbfrontend() below
+            # doesn't surface a sibling reaction's old failure as this
+            # brand-new reaction+path's status before its own attempt exists.
+            comp_row = query_by_columns(DBComposition, {"composition": chemical_formula})
+            if comp_row:
+                stale_step_status = comp_row[0].step_status or {}
+                for key in _SHARED_STEP_KEYS:
+                    if stale_step_status.get(key) == "Failed":
+                        update_step_status_path(DBComposition, comp_row[0].uuid, [key], "Pending")
+
+            submit_mainworkchain(chemical_formula=chemical_formula, chemical_systems=new_chemsys,
+                                 reaction=reaction, reaction_path=reaction_path,
+                                 similarities=similars, sqs=sqs)
+        except Exception as exc:
+            print(f"add_from_frontend: entry {entry_uuid or entry} will be retried "
+                  f"next tick: {exc}")
+            continue
 
     # Surface workflow progress back to the frontend / backend API for every
     # existing row (this cycle's new rows included). update_dbfrontend() is the
@@ -327,10 +382,32 @@ def update_dbfrontend():
             row.composition: row for row in session.query(DBComposition).all()
         }
 
+        active_labels = None
+        if any((r.status or "").lower() == "pending" for r in frontend_rows):
+            try:
+                active_labels = {
+                    label for (label,) in QueryBuilder().append(
+                        WorkChainNode,
+                        filters={"attributes.process_state": {"in": ["created", "running", "waiting"]}},
+                        project=["label"],
+                    ).all()
+                }
+            except Exception as exc:
+                print(f"update_dbfrontend: could not list active workchains: {exc}")
+
         updates = []
         for fe_row in frontend_rows:
             try:
                 key = Composition(fe_row.composition).reduced_formula
+
+                # A Pending row has not been picked up yet; its composition's
+                # step_status belongs to sibling reactions (e.g. a stale
+                # "Failed"), so leave it Pending until its own chain exists.
+                if (fe_row.status or "").lower() == "pending" and active_labels is not None:
+                    label = f"CatalystChain {fe_row.reaction}:{fe_row.reaction_path} on {key}"
+                    if label not in active_labels:
+                        continue
+
                 comp_row = compositions.get(key)
                 if comp_row is None:                 # not picked up by a workflow yet
                     continue
@@ -339,6 +416,11 @@ def update_dbfrontend():
                     comp_row.step_status, fe_row.reaction, fe_row.reaction_path
                 )
                 new_status = _derive_frontend_status(projected)
+                # A derived "Pending" means no step has run for this row. If the
+                # row is already "Failed" that is a rejection (e.g. unimplemented
+                # reaction/path), so don't downgrade it and re-queue it forever.
+                if new_status == "Pending" and fe_row.status == "Failed":
+                    continue
                 # The report URL is recorded on DBComposition.attributes by
                 # MainWorkChain.pipeline_report() when it writes the file, so we
                 # copy it verbatim rather than re-deriving the path convention.
