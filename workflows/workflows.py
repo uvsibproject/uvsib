@@ -210,7 +210,7 @@ _ORPHAN_GRACE_PERIOD = timedelta(minutes=15)
 
 # Shared/"pioneer" steps: one per composition, owned by whichever reaction gets
 # there first (see the 'pioneered' comment in add_from_frontend).
-_SHARED_STEP_KEYS = ["pd_ml", "pd_verification", "synthesizability", "sqs", "surface_builder"]
+_SHARED_STEP_KEYS = ["pd_ml", "pd_verification", "sqs", "surface_builder"]
 # Per-(reaction, reaction_path) steps: step_status[key][reaction][reaction_path].
 _PER_REACTION_STEP_KEYS = ["adsorbates", "akmc", "pipeline_report"]
 
@@ -233,7 +233,7 @@ def reset_orphaned_compositions():
     Mirrors reset_orphaned_chemsys(), but a killed MainWorkChain leaves
     "Running" behind in TWO places, not one: the top-level ``status`` column,
     and ``step_status`` -- which records the same state per shared step
-    (pd_ml, pd_verification, synthesizability, sqs, surface_builder) and per
+    (pd_ml, pd_verification, sqs, surface_builder) and per
     (reaction, reaction_path) for adsorbates/akmc/pipeline_report.
     should_wait_*() (main.py) makes any sibling WorkChain on the same
     composition -- including a fresh resubmission of the very same

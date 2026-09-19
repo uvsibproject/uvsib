@@ -29,8 +29,7 @@
 		"similarity = uvsib.codes.similarity.calculation:SimilarityCalculation",
 		"sqs = uvsib.codes.sqs.calculation:SQSCalculation",
 		"phonon = uvsib.codes.phonon.calculation:PhononCalculation",
-		"electronic = uvsib.codes.electronic.calculation:ElectronicCalculation",
-		"precursor_search = uvsib.codes.precursor_search.calculation:PrecursorSearchCalculation"
+		"electronic = uvsib.codes.electronic.calculation:ElectronicCalculation"
 	],
 	"aiida.parsers": [
 		"mattergen_parser = uvsib.codes.mattergen.parser:MatterGenParser",
@@ -46,8 +45,7 @@
 		"similarity_parser = uvsib.codes.similarity.parser:SimilarityParser",
 		"sqs_parser = uvsib.codes.sqs.parser:SQSParser",
 		"phonon_parser = uvsib.codes.phonon.parser:PhononParser",
-		"electronic_parser = uvsib.codes.electronic.parser:ElectronicParser",
-		"precursor_search_parser = uvsib.codes.precursor_search.parser:PrecursorSearchParser"
+		"electronic_parser = uvsib.codes.electronic.parser:ElectronicParser"
 	],
 	"aiida.workflows": [
 		"mattergen.base = uvsib.codes.mattergen.workchain:MatterGenBaseWorkChain",
@@ -67,7 +65,6 @@
 		"bandalignment = uvsib.workchains.band_alignment:BandAlignmentWorkChain",
 		"csp = uvsib.workchains.csp:CSPWorkChain",
 		"gen = uvsib.workchains.gen:GeneratorWorkChain",
-		"synthesizability = uvsib.workchains.synthesizability:SynthesizabilityWorkChain",
 		"surfacebuilder = uvsib.workchains.surface_builder:SurfaceBuilderWorkChain",
 		"opticalscreen = uvsib.workchains.optical_screen:OpticalScreenWorkChain",
 		"electronic = uvsib.codes.electronic.workchain:ElectronicWorkChain",

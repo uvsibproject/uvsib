@@ -14,7 +14,7 @@ Solar energy can, in principle, drive the production of fuels and fundamental ch
 - efficient charge separation and transport;
 - favorable surface reaction energetics;
 - chemical and structural stability;
-- low cost, scalability, and synthesizability.
+- low cost and scalability.
 
 Experimental trial-and-error across the enormous chemical and structural search space is expensive and slow. UvSiB addresses this challenge by connecting materials generation, machine-learning screening, first-principles verification, surface modelling, and reaction analysis in reproducible computational workflows.
 
@@ -54,8 +54,7 @@ These models can be used for rapid structure relaxation and screening before mor
 ### Thermodynamic stability
 
 - machine-learning phase-diagram construction and convex-hull analysis;
-- DFT phase-diagram verification;
-- precursor / synthesis-route search.
+- DFT phase-diagram verification.
 
 ### Electronic structure and light harvesting
 
@@ -82,7 +81,7 @@ UvSiB is structured as an **AiiDA plugin**. The main components are:
 uvsib/
 ├── codes/          # AiiDA calculations, parsers, workchains, and executable templates
 │                   #   (mattergen, gnome, diffcsp, mattersim, mace, upet, uma,
-│                   #    minimahopping, electronic, precursor_search, vasp)
+│                   #    minimahopping, electronic, vasp)
 ├── workchains/     # Higher-level scientific workflows
 ├── workflows/      # Workflow orchestration and settings
 ├── db/             # SQLAlchemy database models and utility functions
@@ -110,7 +109,7 @@ The `aiida.workflows` entry points currently include:
 | `akmc` | Adaptive kinetic Monte Carlo with MLIP saddle searches |
 
 The `aiida.calculations` and `aiida.parsers` groups register the matching low-level codes, including
-`electronic` (ML band gap / band edges) and `precursor_search`.
+`electronic` (ML band gap / band edges).
 
 ## Requirements
 
@@ -154,9 +153,6 @@ TensorFlow-based); plus `minimahopping` for the minima-hopping runner.
 
 **Generative models**: `mattergen`, the GNoME SAPS runner (pymatgen only), and `diffcsp` (its upstream
 repo checkout, `torch`, `pytorch-lightning`, `hydra-core`, …).
-
-**Precursor search**: an external containerized agent (optionally literature APIs such as
-Crossref / OpenAlex / Semantic Scholar); no fixed Python dependency in this repo.
 
 Individual workflows may also require external DFT codes, trained model checkpoints, pseudopotentials,
 PostgreSQL/database access, scheduler configuration, API keys, and AiiDA computer/code registrations.

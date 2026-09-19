@@ -59,11 +59,6 @@ MATTERGEN_CSP_ENABLED = bool(inputs.get('mattergen', {}).get('csp_enabled', Fals
 # (scripts/generation.py), which was a worse fit; see docs/diffcsp_generation.md.
 DIFFCSP_ENABLED = bool(inputs.get('diffcsp', {}).get('enabled', True))
 
-# Classify all generated structures by synthesizability (thermo + reaction +
-# PU) as a MainWorkChain stage after the phase diagram. Configured in input.yaml
-# under `synthesizability:`; enabled by default (post-processing only, no jobs).
-SYNTH_ENABLED = bool(inputs.get('synthesizability', {}).get('enabled', False))
-
 # Run adaptive kinetic Monte Carlo after adsorbate screening. This is opt-in
 # because dimer searches are much more expensive than the CHE adsorbate pass.
 AKMC_ENABLED = bool(inputs.get('akmc', {}).get('enabled', True))
@@ -79,8 +74,8 @@ AKMC_ENABLED = bool(inputs.get('akmc', {}).get('enabled', True))
 # (reaction-agnostic gap window); default off.
 OPTICAL_SCREEN_ENABLED = bool(inputs.get('optical_screen', {}).get('enabled', False))
 
-# Soft stop: gracefully end the MainWorkChain after the generation/phase-diagram/
-# synthesizability stages, before the surface builder (and adsorbates) start.
+# Soft stop: gracefully end the MainWorkChain after the generation/phase-diagram
+# stages, before the surface builder (and adsorbates) start.
 # Opt-in via input.yaml (`soft_stop: {before_surface_builder: true}`); absent or
 # false -> the full pipeline runs as before.
 SOFT_STOP_BEFORE_SURFACE = bool(inputs.get('soft_stop', {}).get('before_surface_builder', False))
