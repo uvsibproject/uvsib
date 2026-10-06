@@ -383,7 +383,10 @@ def update_dbfrontend():
         }
 
         active_labels = None
-        if any((r.status or "").lower() == "pending" for r in frontend_rows):
+        # "failed" is included so the sticky-Failed guard below still has the
+        # active-chain list when a Failed row is the only non-Done row;
+        # otherwise it flips back to "Running" and re-fails every grace period.
+        if any((r.status or "").lower() in ("pending", "running", "failed") for r in frontend_rows):
             try:
                 active_labels = {
                     label for (label,) in QueryBuilder().append(
@@ -416,6 +419,21 @@ def update_dbfrontend():
                     comp_row.step_status, fe_row.reaction, fe_row.reaction_path
                 )
                 new_status = _derive_frontend_status(projected)
+                # A killed/crashed chain can die before marking any step
+                # "Running", so nothing else ever flips the row to "Failed".
+                # Running with no live chain past the grace period -> orphaned.
+                if new_status == "Running" and active_labels is not None:
+                    label = f"CatalystChain {fe_row.reaction}:{fe_row.reaction_path} on {key}"
+                    last_touch = fe_row.mtime or fe_row.ctime
+                    if last_touch is not None and last_touch.tzinfo is None:
+                        # timestamp-without-tz column: stored in server local time
+                        last_touch = last_touch.replace(tzinfo=datetime.now().astimezone().tzinfo)
+                    stale = (last_touch is not None
+                             and datetime.now(timezone.utc) - last_touch > _ORPHAN_GRACE_PERIOD)
+                    # An already-Failed row stays Failed (its mtime was just
+                    # refreshed by that write) until it is resubmitted.
+                    if label not in active_labels and (stale or fe_row.status == "Failed"):
+                        new_status = "Failed"
                 # A derived "Pending" means no step has run for this row. If the
                 # row is already "Failed" that is a rejection (e.g. unimplemented
                 # reaction/path), so don't downgrade it and re-queue it forever.

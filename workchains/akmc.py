@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import datetime, timezone
 from ase.io import jsonio
 from aiida.engine import WorkChain
@@ -41,7 +42,7 @@ class AKMCWorkChain(WorkChain):
         self.ctx.reaction = self.inputs.reaction.value
         self.ctx.reaction_path = self.inputs.reaction_path.value
         cfg = _akmc_settings()
-        self.ctx.max_minima = int(cfg.get("max_minima", 10))
+        self.ctx.max_paths = int(cfg.get("max_paths", 3))
         self.ctx.records = []
         self.report(
             f"Running AKMCWorkChain for {self.ctx.chemical_formula}. "
@@ -59,15 +60,21 @@ class AKMCWorkChain(WorkChain):
         )
         rows = sorted(rows, key=lambda row: row.eta)
 
+        # Each row is one complete adsorption path (one surface/site holding
+        # *O, *OH, *OOH, ...). Keep the max_paths lowest-eta rows and run AKMC
+        # on every surface-bound minimum in them, so each selected path is
+        # covered end to end and every intermediate is sampled equally.
         records = []
+        n_paths = 0
         for row in rows:
             adsorb_set = row.adsorb_set or {}
+            row_records = []
             for atoms_json in adsorb_set.get("structures", []):
                 atoms = jsonio.decode(atoms_json)
                 adsorbate = atoms.info.get("adsorbate")
                 if not _surface_bound_adsorbate(adsorbate):
                     continue
-                records.append({
+                row_records.append({
                     "row_id": row.id,
                     "surface_id": row.surface_id,
                     "eta": float(row.eta),
@@ -78,9 +85,11 @@ class AKMCWorkChain(WorkChain):
                     "reaction_path": row.reaction_path,
                     "atoms_json": atoms_json,
                 })
-                if len(records) >= self.ctx.max_minima:
-                    break
-            if len(records) >= self.ctx.max_minima:
+            if not row_records:
+                continue
+            records.extend(row_records)
+            n_paths += 1
+            if n_paths >= self.ctx.max_paths:
                 break
 
         if not records:
@@ -90,7 +99,8 @@ class AKMCWorkChain(WorkChain):
         self.ctx.records = records
         best = records[0]
         self.report(
-            f"Selected {len(records)} AKMC minima from lowest-eta adsorbate rows; "
+            f"Selected {len(records)} AKMC minima from the {n_paths} lowest-eta "
+            f"adsorption paths (rows {sorted({r['row_id'] for r in records})}); "
             f"best eta={best['eta']:.3f} eV on surface {best['surface_id']}."
         )
 

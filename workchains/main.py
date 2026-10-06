@@ -531,8 +531,8 @@ class MainWorkChain(WorkChain):
         SurfaceBuilderWorkChain / AdsorbatesWorkChain (and AKMCWorkChain, if
         enabled) have all written the rows ``pipeline_report.py`` joins.
         Output goes to one folder per (composition, reaction, reaction_path)
-        under ``settings.REPORTS_DIR`` (a fixed directory next to the
-        ``uvsib`` package, NOT the per-run ``settings.run_dir``) so
+        under ``settings.REPORTS_DIR`` (set in ``run_dir/run.py``, NOT the
+        per-run ``settings.run_dir``) so
         parallel/repeated runs never collide or overwrite each other, and
         reports always land in the same predictable place regardless of
         which run directory produced them. ``render_html_report()`` writes its

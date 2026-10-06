@@ -67,8 +67,8 @@ Caveats worth knowing:
   ``MainWorkChain.pipeline_report`` (``uvsib/workchains/main.py``) -- which
   calls ``report()`` and ``render_html_report()`` as its own outline step
   right after AKMC, writing into ``settings.REPORTS_DIR/<composition>_
-  <reaction>_<reaction_path>/`` (a fixed directory next to the ``uvsib``
-  package, not the per-run ``settings.run_dir``) -- works safely: it already
+  <reaction>_<reaction_path>/`` (set in ``run_dir/run.py``, not the
+  per-run ``settings.run_dir``) -- works safely: it already
   runs inside a profile-loaded AiiDA worker process. ``render_html_report()`` ALSO always
   tries this same profile-loading import via ``_ml_surface_model()``/
   ``_ml_stage_head()`` (for the "ML Bulk/Surface Model" + task metadata
@@ -1255,11 +1255,71 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
             Download Raw Data (JSON)
           </a>
         </div>
+
+        <div class="rounded-xl border bg-white shadow-sm p-6">
+          <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center gap-2">
+              <i data-lucide="quote" class="w-5 h-5 text-primary"></i>
+              <h3 class="text-lg font-bold text-slate-900">
+                Cite This Project
+              </h3>
+            </div>
+          </div>
+
+          <p class="text-xs text-slate-500 mb-3">
+            If you use UvSiB in your research, please cite our project and
+            open-source repository:
+          </p>
+
+          <!-- TODO: Update BibTeX citation in this box -->
+          <div
+            class="relative bg-slate-900 text-slate-200 rounded-lg p-4 font-mono text-xs overflow-x-auto mb-4 border border-slate-800"
+          >
+            <pre id="bibtex-content">
+@software{{uvsib2026,
+  author = {{Research Team, UvSiB CASUS-HZDR}},
+  title = {{UvSiB: Predictive Chemistry and Molecular Simulation Framework}},
+  year = {{2026}},
+  url = {{https://github.com/casus/uvsib-framework}},
+  note = {{Open-source research platform}}
+}}</pre
+            >
+          </div>
+
+          <button
+            type="button"
+            onclick="copyBibtex()"
+            class="w-full inline-flex items-center justify-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold text-sm py-2.5 px-4 rounded-lg transition-all cursor-pointer border border-slate-200"
+          >
+            <i data-lucide="copy" id="copy-icon" class="w-4 h-4"></i>
+            <span id="copy-text">Copy BibTeX</span>
+          </button>
+        </div>
       </div>
     </div>
 
     <script>
       lucide.createIcons();
+
+      function copyBibtex() {{
+        var text = document.getElementById("bibtex-content").innerText;
+        var label = document.getElementById("copy-text");
+        function done() {{
+          label.textContent = "Copied!";
+          setTimeout(function () {{ label.textContent = "Copy BibTeX"; }}, 2000);
+        }}
+        if (navigator.clipboard && window.isSecureContext) {{
+          navigator.clipboard.writeText(text).then(done);
+        }} else {{
+          var ta = document.createElement("textarea");
+          ta.value = text;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+          done();
+        }}
+      }}
     </script>
   </body>
 </html>

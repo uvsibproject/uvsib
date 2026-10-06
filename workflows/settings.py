@@ -61,7 +61,7 @@ DIFFCSP_ENABLED = bool(inputs.get('diffcsp', {}).get('enabled', True))
 
 # Run adaptive kinetic Monte Carlo after adsorbate screening. This is opt-in
 # because dimer searches are much more expensive than the CHE adsorbate pass.
-AKMC_ENABLED = bool(inputs.get('akmc', {}).get('enabled', True))
+AKMC_ENABLED = bool(inputs.get('akmc', {}).get('enabled', False))
 
 # No-DFT electronic / light-harvesting screen (ML band gap + Butler-Ginley band
 # edges + photocatalytic straddle test) as a PhaseDiagramMLWorkChain branch,
@@ -89,16 +89,10 @@ files_path = os.path.join(code_folder_path, 'files')
 molecular_reference_files = os.path.join(code_folder_path, 'files', 'molecular_references')
 
 # Where MainWorkChain.pipeline_report writes generated figures + report.html
-# (via uvsib.workchains.pipeline_report.report()/render_html_report()).
-# Sibling to the uvsib package directory (NOT run_dir, which is a
-# per-run/per-machine AiiDA-tracked directory) so reports always land in one
-# fixed, predictable place next to the code -- e.g.
-# /data/hossein/platform/reports if uvsib lives in /data/hossein/platform/uvsib.
-REPORTS_DIR = "/opt/uvsib/backend/uploads/public/result/" #os.path.join(os.path.dirname(uvsib_directory), 'reports')
-
-# Public URL prefix at which the backend (app/main.py) serves the contents of
-# REPORTS_DIR. REPORTS_DIR is the backend's <UPLOAD_ROOT>/public/result/, and its
-# StaticFiles mount maps "/uploads" -> "<UPLOAD_ROOT>/public", so a report
-# written to REPORTS_DIR/<folder>/report.html is served at
-# REPORTS_URL_PREFIX/<folder>/report.html. Keep the two in sync.
-REPORTS_URL_PREFIX = "/uploads/result"
+# (via uvsib.workchains.pipeline_report.report()/render_html_report()), and the
+# public URL prefix at which the backend serves that directory. Both are
+# machine/deployment-specific, so they are defined in run_dir/run.py
+# (REPORTS_DIR, REPORTS_URL_PREFIX) and passed through AiiDA groups, like
+# run_dir above.
+REPORTS_DIR = Group.collection.get(label='uvsib_reports_dir').nodes[0].value
+REPORTS_URL_PREFIX = Group.collection.get(label='uvsib_reports_url_prefix').nodes[0].value
