@@ -74,6 +74,15 @@ AKMC_ENABLED = bool(inputs.get('akmc', {}).get('enabled', False))
 # (reaction-agnostic gap window); default off.
 OPTICAL_SCREEN_ENABLED = bool(inputs.get('optical_screen', {}).get('enabled', False))
 
+# CSLLM synthesizability / synthesis-method / precursor prediction
+# (SynthesizabilityScreenWorkChain) as a PhaseDiagramMLWorkChain branch, run
+# after the optical screen on the bulks that passed the E_above_hull screen.
+# Advisory only -- it never filters structures. Opt-in via input.yaml
+# (`synthesizability: {enabled: true}`) because it needs a dedicated GPU
+# `CSLLM` code and the CSLLM weights (see config.yaml and
+# docs/synthesizability_workchain.md). Default OFF.
+SYNTHESIZABILITY_ENABLED = bool(inputs.get('synthesizability', {}).get('enabled', True))
+
 # Soft stop: gracefully end the MainWorkChain after the generation/phase-diagram
 # stages, before the surface builder (and adsorbates) start.
 # Opt-in via input.yaml (`soft_stop: {before_surface_builder: true}`); absent or

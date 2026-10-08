@@ -93,6 +93,10 @@ class PhaseDiagramMLWorkChain(WorkChain):
                 cls.optical_screen,
                 cls.inspect_optical_screen
             ),
+            if_(cls.should_run_synthesizability)(
+                cls.synthesizability,
+                cls.inspect_synthesizability
+            ),
             cls.final_report
         )
 
@@ -341,6 +345,39 @@ class PhaseDiagramMLWorkChain(WorkChain):
             return
         self.report("OpticalScreenWorkChain finished; band_info written for the ML bulk selection.")
 
+    def should_run_synthesizability(self):
+        """Run the CSLLM synthesizability screen (SynthesizabilityScreenWorkChain)
+        on the ML bulk selection. Opt-in (``settings.SYNTHESIZABILITY_ENABLED``);
+        skipped if there is nothing selected to screen."""
+        if not settings.SYNTHESIZABILITY_ENABLED:
+            return False
+        rows = query_by_columns(DBComposition, {"composition": self.ctx.chemical_formula})
+        if not rows or not (rows[0].stable_struct or {}).get("ml_selection"):
+            self.report("Synthesizability screen: no ML bulk selection to screen; skipping.")
+            return False
+        return True
+
+    def synthesizability(self):
+        """Submit SynthesizabilityScreenWorkChain for the ML bulk selection."""
+        try:
+            builder = self._construct_synthesizability_builder()
+        except Exception as exc:  # e.g. the `CSLLM` code is not configured
+            self.report(f"Synthesizability screen: cannot build builder ({exc}); skipping.")
+            return
+        future = self.submit(builder)
+        self.to_context(**{"synthesizability": future})
+
+    def inspect_synthesizability(self):
+        """Advisory stage: never fail the phase diagram on the synthesizability screen."""
+        if "synthesizability" not in self.ctx:
+            return
+        wch = self.ctx.synthesizability
+        if not wch.is_finished_ok:
+            self.report(f"SynthesizabilityScreenWorkChain did not finish OK (exit {wch.exit_status}); "
+                        "continuing without synthesizability predictions.")
+            return
+        self.report("SynthesizabilityScreenWorkChain finished; predictions written for the ML bulk selection.")
+
     def final_report(self):
         """Final report"""
         self.report("PhaseDiagramML WorkChain finished successfully")
@@ -374,6 +411,13 @@ class PhaseDiagramMLWorkChain(WorkChain):
     def _construct_optical_screen_builder(self):
         """OpticalScreenWorkChain builder (no-DFT light-harvesting screen)."""
         Workflow = WorkflowFactory("opticalscreen")
+        builder = Workflow.get_builder()
+        builder.chemical_formula = Str(self.ctx.chemical_formula)
+        return builder
+
+    def _construct_synthesizability_builder(self):
+        """SynthesizabilityScreenWorkChain builder (CSLLM screen)."""
+        Workflow = WorkflowFactory("synthesizabilityscreen")
         builder = Workflow.get_builder()
         builder.chemical_formula = Str(self.ctx.chemical_formula)
         return builder

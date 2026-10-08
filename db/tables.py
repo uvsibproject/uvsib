@@ -186,17 +186,45 @@ class DBFrontend(Base):
     def __repr__(self):
         return f"<DBFrontend(uuid={self.uuid}, username={self.username})>"
 
-class DBSimilarities(Base):
-    __tablename__ = "db_similarities"
-    uuid = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, unique=True, nullable=False)
-    similarity = Column(Float, nullable=True)
-    composition = Column(String, nullable=True)
-    csp_structure = Column(JSONB, nullable=True)
-    chemical_system = Column(String, nullable=True)
-    reference_structure = Column(JSONB, nullable=True)
-    reference_material_id = Column(String, nullable=True)
-    mtime = Column(DateTime(timezone=True), onupdate=func.now())
+#class DBSimilarities(Base):
+#    __tablename__ = "db_similarities"
+#    uuid = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, unique=True, nullable=False)
+#    similarity = Column(Float, nullable=True)
+#    composition = Column(String, nullable=True)
+#    csp_structure = Column(JSONB, nullable=True)
+#    chemical_system = Column(String, nullable=True)
+#    reference_structure = Column(JSONB, nullable=True)
+#    reference_material_id = Column(String, nullable=True)
+#    mtime = Column(DateTime(timezone=True), onupdate=func.now())
+#    ctime = Column(DateTime(timezone=True), server_default=func.now())
+
+class DBSynthesizability(Base):
+    """Synthesizability prediction for one ML-selected bulk by one model
+    (written by SynthesizabilityScreenWorkChain). One row per
+    (structure_uuid, synthesizability_model), so several models can score the
+    same bulk side by side; joins to DBStructureVersion / DBSurface /
+    DBSurfaceMLAdsorbate on structure_uuid. Advisory only -- nothing in the
+    pipeline filters on it."""
+    __tablename__ = "db_synthesizability"
+
+    id = Column(Integer, primary_key=True)
+    structure_uuid = Column(UUID(as_uuid=True), ForeignKey("db_structure.uuid", ondelete="CASCADE"), nullable=False)
+    composition = Column(String, nullable=False)
+    synthesizability_model = Column(String, nullable=False)
+    synthesizability_score = Column(DOUBLE_PRECISION, nullable=True)        # P(synthesizable)
+    synthesizability_label = Column(String, nullable=True)                  # synthesizable / not synthesizable / uncertain
+    synthesizability_uncertainty = Column(DOUBLE_PRECISION, nullable=True)  # binary entropy of the score, bits
+    predicted_synthesis_method = Column(String, nullable=True)
+    predicted_precursors = Column(JSONB, nullable=True)                     # ranked precursor sets
+    in_domain = Column(Boolean, nullable=True)                              # precursor model's validated scope
+    ehull = Column(DOUBLE_PRECISION, nullable=True)                         # snapshot from the ML selection
+    attributes = Column(JSONB, nullable=True)                               # raw model output + config
     ctime = Column(DateTime(timezone=True), server_default=func.now())
+    mtime = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("structure_uuid", "synthesizability_model", name="_synthesizability_struct_model_uc"),
+    )
 
 if __name__ == "__main__":
     engine = create_engine(DB_URL, echo=False)

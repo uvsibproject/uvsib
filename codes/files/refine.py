@@ -1,6 +1,7 @@
 import json
 from pymatgen.core.structure import Lattice, Structure
 from pymatgen.analysis.structure_matcher import StructureMatcher
+from pymatgen.core.periodic_table import Element
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer, SymmetryUndeterminedError
 from ase.io import read
 from itertools import product
@@ -97,6 +98,15 @@ def ase_to_pmg(atoms):
                           coords_are_cartesian=False
     )
 
+def is_all_metal(composition):
+    """
+    True if every element in the composition is a metal. Metallic bonding
+    has no fixed ionic oxidation state, so compositions like this (candidate
+    intermetallics/alloys) aren't governed by the ionic charge-balance rule
+    below at all -- the check doesn't apply to them, rather than "failing" it.
+    """
+    return all(Element(el.symbol).is_metal for el in composition.elements)
+
 def select_charge_neutral(structures):
     """
    Filter structures that are charge neutral based on oxidation states from context
@@ -106,6 +116,10 @@ def select_charge_neutral(structures):
     for struct_dict in structures:
         composition = Structure.from_dict(struct_dict).composition
         if composition.is_element:
+            neutral_struct.append(struct_dict)
+            continue
+
+        if is_all_metal(composition):
             neutral_struct.append(struct_dict)
             continue
 

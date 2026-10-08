@@ -109,7 +109,7 @@ def _facebuild_options():
             "num_cores_per_mpiproc": js["cpus"],
         },
         "max_wallclock_seconds": js["time"],
-        "parser_name": "sqs_parser",   # generic output.json -> Dict
+        "parser_name": "generic_parser",   # generic output.json -> Dict
     }
     if js.get("exclusive"):
         options["custom_scheduler_commands"] = "#SBATCH --exclusive"

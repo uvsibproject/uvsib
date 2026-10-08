@@ -4,7 +4,7 @@ from sqlalchemy import inspect, delete, text
 from pymatgen.core import Composition, Structure
 from uvsib.db.session import get_session
 from uvsib.db.tables import (DBChemsys, DBStructure, DBStructureVersion, DBSurface,
-                             DBSurfaceMLAdsorbate, DBAkmcEvent)
+                             DBSurfaceMLAdsorbate, DBAkmcEvent, DBSynthesizability)
 
 
 def add_surface_ml_adsorbate(existing_uuid, surf_id, surface_miller_index, comp, react, react_path, site_type, ads_coord, repeat, e, dG_steps, dG_cumulative, ad_set):
@@ -311,6 +311,24 @@ def update_structure_band_info(structure_uuid, method, band_info, source=None):
         if version is None:
             return False
         version.band_info = band_info
+        session.commit()
+    return True
+
+
+def upsert_synthesizability(values):
+    """Insert or overwrite the DBSynthesizability row keyed by
+    ``(values["structure_uuid"], values["synthesizability_model"])`` -- a
+    rerun of SynthesizabilityScreenWorkChain replaces its previous prediction
+    instead of piling up duplicates."""
+    with get_session() as session:
+        row = session.query(DBSynthesizability).filter_by(
+            structure_uuid=values["structure_uuid"],
+            synthesizability_model=values["synthesizability_model"]).first()
+        if row is None:
+            session.add(DBSynthesizability(**values))
+        else:
+            for key, value in values.items():
+                setattr(row, key, value)
         session.commit()
     return True
 

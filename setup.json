@@ -26,10 +26,9 @@
 		"sevennet = uvsib.codes.sevennet.calculation:SevenNetCalculation",
 		"grace = uvsib.codes.grace.calculation:GRACECalculation",
 		"mh = uvsib.codes.minimahopping.calculation:MinimaHoppingCalculation",
-		"similarity = uvsib.codes.similarity.calculation:SimilarityCalculation",
 		"sqs = uvsib.codes.sqs.calculation:SQSCalculation",
-		"phonon = uvsib.codes.phonon.calculation:PhononCalculation",
-		"electronic = uvsib.codes.electronic.calculation:ElectronicCalculation"
+		"electronic = uvsib.codes.electronic.calculation:ElectronicCalculation",
+		"synthesizability = uvsib.codes.synthesizability.calculation:SynthesizabilityCalculation"
 	],
 	"aiida.parsers": [
 		"mattergen_parser = uvsib.codes.mattergen.parser:MatterGenParser",
@@ -42,10 +41,10 @@
 		"sevennet_parser = uvsib.codes.sevennet.parser:SevenNetParser",
 		"grace_parser = uvsib.codes.grace.parser:GRACEParser",
 		"minimahopping_parser = uvsib.codes.minimahopping.parser:MinimaHoppingParser",
-		"similarity_parser = uvsib.codes.similarity.parser:SimilarityParser",
 		"sqs_parser = uvsib.codes.sqs.parser:SQSParser",
-		"phonon_parser = uvsib.codes.phonon.parser:PhononParser",
-		"electronic_parser = uvsib.codes.electronic.parser:ElectronicParser"
+		"electronic_parser = uvsib.codes.electronic.parser:ElectronicParser",
+		"generic_parser = uvsib.workchains.parser:GenericParser",
+		"synthesizability_parser = uvsib.codes.synthesizability.parser:SynthesizabilityParser"
 	],
 	"aiida.workflows": [
 		"mattergen.base = uvsib.codes.mattergen.workchain:MatterGenBaseWorkChain",
@@ -68,13 +67,12 @@
 		"surfacebuilder = uvsib.workchains.surface_builder:SurfaceBuilderWorkChain",
 		"opticalscreen = uvsib.workchains.optical_screen:OpticalScreenWorkChain",
 		"electronic = uvsib.codes.electronic.workchain:ElectronicWorkChain",
+		"synthesizability = uvsib.codes.synthesizability.workchain:SynthesizabilityWorkChain",
+		"synthesizabilityscreen = uvsib.workchains.synthesizability_screen:SynthesizabilityScreenWorkChain",
 		"adsorbates = uvsib.workchains.adsorbates:AdsorbatesWorkChain",
 		"akmc = uvsib.workchains.akmc:AKMCWorkChain",
-		"similarity = uvsib.workchains.similarity:SimilarityWorkChain",
-		"similarity_calc = uvsib.codes.similarity.workchain:SimilarityWorkChain",
 		"sqs = uvsib.workchains.sqs:SQSWorkChain",
-		"sqs_calc = uvsib.codes.sqs.workchain:SQSWorkChain",
-		"phonon = uvsib.codes.phonon.workchain:PhononWorkChain"
+		"sqs_calc = uvsib.codes.sqs.workchain:SQSWorkChain"
 	]
     }
 }

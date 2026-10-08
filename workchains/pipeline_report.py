@@ -14,7 +14,8 @@ Public API:
     bulk_candidates(chemical_formula) -> [bulk dict, ...]  # now includes "source"/"mp_id"/"ml_bulk_model"
     surfaces_for_bulk(chemical_formula) -> {structure_uuid: [surface dict, ...]}  # now includes "n_atoms"/"area"/"shift"
     reaction_results(chemical_formula, reaction, reaction_path) -> {structure_uuid: [candidate dict, ...]}  # now includes "repeat"/"coverage" (adsorbate concentration, in ML)
-    electronic_for_bulk(chemical_formula) -> {structure_uuid: band_info dict}  # no-DFT light screen (empty if OpticalScreenWorkChain not run)
+    electronic_for_bulk(chemical_formula) -> {structure_uuid: band_info dict}  # no-DFT light screen (empty if OpticalScreenWorkChain not run); negative ML gaps clamped to 0
+    synthesizability_for_bulk(chemical_formula) -> {structure_uuid: [prediction dict, ...]}  # CSLLM screen (empty if SynthesizabilityScreenWorkChain not run)
     step_labels(reaction, reaction_path) -> [str, ...] | None
     summarize(chemical_formula, reaction, reaction_path) -> [bulk summary dict, ...]  # each surface now also carries its OWN reaction_candidates/best_candidate
     report(chemical_formula, reaction, reaction_path, plot_dir=None) -> [bulk summary dict, ...]
@@ -91,7 +92,7 @@ Caveats worth knowing:
 """
 from collections import defaultdict
 
-from uvsib.db.tables import DBComposition, DBSurface, DBSurfaceMLAdsorbate
+from uvsib.db.tables import DBComposition, DBSurface, DBSurfaceMLAdsorbate, DBSynthesizability
 from uvsib.db.utils import query_by_columns, query_structure
 
 
@@ -291,8 +292,64 @@ def electronic_for_bulk(chemical_formula):
             continue
         if model is not None and version.method != model:
             continue
-        out[str(version.structure_uuid)] = version.band_info
+        out[str(version.structure_uuid)] = _clamp_negative_gap(version.band_info)
     return out
+
+
+def _clamp_negative_gap(band_info):
+    """A negative ML gap is a model artefact, not physics: report it as 0 eV.
+    Butler--Ginley edges are cb = chi - E_e - gap/2 and vb = cb + gap, so with
+    gap = 0 both collapse onto their midpoint; the stored straddle margins are
+    recomputed from those edges. The model's own value is kept as
+    ``gap_raw_eV``. Returns ``band_info`` unchanged when the gap is >= 0."""
+    gap = (band_info or {}).get("gap_eV")
+    if gap is None or gap >= 0:
+        return band_info
+    from uvsib.workchains.redox_couples import straddle_verdict
+
+    info = dict(band_info)
+    info["gap_raw_eV"] = gap
+    info["gap_eV"] = 0.0
+    info["gap_values_eV"] = {k: max(v, 0.0) for k, v in (info.get("gap_values_eV") or {}).items()}
+    info["notes"] = list(info.get("notes") or []) + [
+        f"negative ML gap ({gap:.4f} eV) clamped to 0; band edges set to mid-gap"]
+    for key in ("band_edges_vs_rhe_V", "band_edges_vs_vacuum_eV"):
+        edges = info.get(key)
+        if edges and edges.get("cb") is not None and edges.get("vb") is not None:
+            mid = round(0.5 * (edges["cb"] + edges["vb"]), 4)
+            info[key] = {**edges, "cb": mid, "vb": mid}
+    rhe = info.get("band_edges_vs_rhe_V")
+    if rhe and info.get("straddle"):
+        info["straddle"] = {
+            reaction: {
+                path: {**v, **straddle_verdict(rhe["cb"], rhe["vb"], v["u_red"], v["u_ox"],
+                                               v.get("margin_required_V", 0.2))}
+                for path, v in by_path.items()}
+            for reaction, by_path in info["straddle"].items()}
+    return info
+
+
+def synthesizability_for_bulk(chemical_formula):
+    """``{structure_uuid: [prediction dict, ...]}`` -- the DBSynthesizability
+    rows SynthesizabilityScreenWorkChain wrote (one per model), sorted by
+    model name. Empty when the screen was not run. DB-only, no AiiDA profile
+    needed."""
+    out = defaultdict(list)
+    for row in query_by_columns(DBSynthesizability, {"composition": chemical_formula}):
+        out[str(row.structure_uuid)].append({
+            "model": row.synthesizability_model,
+            "score": row.synthesizability_score,
+            "label": row.synthesizability_label,
+            "uncertainty": row.synthesizability_uncertainty,
+            "method": row.predicted_synthesis_method,
+            "precursors": row.predicted_precursors,
+            "in_domain": row.in_domain,
+            "ehull": row.ehull,
+            "attributes": row.attributes or {},
+        })
+    for predictions in out.values():
+        predictions.sort(key=lambda p: p["model"])
+    return dict(out)
 
 
 _OER_LABELS = ["*", "*OH", "*O", "*OOH", "O2 + *"]
@@ -355,6 +412,7 @@ def summarize(chemical_formula, reaction, reaction_path):
     surfaces_by_uuid = surfaces_for_bulk(chemical_formula)
     results_by_uuid = reaction_results(chemical_formula, reaction, reaction_path)
     electronic_by_uuid = electronic_for_bulk(chemical_formula)
+    synthesizability_by_uuid = synthesizability_for_bulk(chemical_formula)
 
     all_uuids = set(bulks) | set(surfaces_by_uuid) | set(results_by_uuid)
     summaries = []
@@ -382,6 +440,7 @@ def summarize(chemical_formula, reaction, reaction_path):
             "n_reaction_candidates": len(candidates),
             "best_candidate": candidates[0] if candidates else None,
             "electronic": electronic_by_uuid.get(uid),
+            "synthesizability": synthesizability_by_uuid.get(uid, []),
         })
 
     summaries.sort(key=lambda s: (s["bulk"] is None,
@@ -803,6 +862,288 @@ def raw_data(chemical_formula, reaction, reaction_path, summaries=None):
     return data
 
 
+_SYNTH_BADGE = {
+    "synthesizable": "bg-green-100 text-green-700",
+    "not synthesizable": "bg-red-100 text-red-700",
+    "uncertain": "bg-amber-100 text-amber-700",
+}
+
+_METHOD_LABELS = {
+    "solid_state": "solid-state",
+    "solution": "solution",
+    "solid_state&solution": "solid-state &amp; solution",
+}
+
+
+def _precursor_check(top, esc):
+    """&#10003; / &#9888; marker for the top-ranked precursor set."""
+    if top.get("element_consistent"):
+        return ('<span class="ml-1 text-green-600" title="every target element is '
+                'supplied; no non-volatile foreign elements">&#10003;</span>')
+    why = []
+    if top.get("missing_elements"):
+        why.append("missing " + ", ".join(top["missing_elements"]))
+    if top.get("extra_elements"):
+        why.append("foreign " + ", ".join(top["extra_elements"]))
+    if top.get("unparsable"):
+        why.append("unparsable " + ", ".join(top["unparsable"]))
+    return f'<span class="ml-1 text-red-600" title="{esc("; ".join(why))}">&#9888;</span>'
+
+
+def _method_cell(p, esc):
+    """Compact per-row method cell (only used when polymorphs disagree)."""
+    method = p.get("method")
+    if not method:
+        return "&mdash;"
+    method_probs = (p.get("attributes") or {}).get("method_probabilities") or {}
+    prob = method_probs.get(method)
+    prob_bit = f' <span class="text-slate-400">({prob:.2f})</span>' if prob is not None else ""
+    title = ", ".join(f"{k}: {v:.2f}" for k, v in method_probs.items())
+    return f'<span title="{esc(title)}">{_METHOD_LABELS.get(method, esc(method))}{prob_bit}</span>'
+
+
+def _precursor_cell(p, esc):
+    """Compact per-row precursor cell (only used when polymorphs disagree)."""
+    sets = [x for x in (p.get("precursors") or []) if x.get("precursors")]
+    if not sets:
+        return "&mdash;"
+    top = sets[0]
+    alternatives = " | ".join(" + ".join(x["precursors"]) for x in sets[1:])
+    alt_bit = (f'<div class="text-xs text-slate-400" title="lower-ranked precursor sets">'
+               f'alt: {esc(alternatives)}</div>') if alternatives else ""
+    return (f'<span class="font-mono text-xs">{esc(" + ".join(top["precursors"]))}</span>'
+            f'{_precursor_check(top, esc)}{alt_bit}')
+
+
+def _method_paragraph(formula, p, esc):
+    """Prose for the composition-level method prediction."""
+    method = p.get("method")
+    if not method:
+        return (f"<p><strong>Synthesis method.</strong> No method prediction is available "
+                f"for {esc(formula)}.</p>")
+    method_probs = (p.get("attributes") or {}).get("method_probabilities") or {}
+    prob = method_probs.get(method)
+    prob_bit = f" (P&nbsp;=&nbsp;{prob:.2f})" if prob is not None else ""
+    others = [f"{_METHOD_LABELS.get(k, esc(k))} {v:.2f}"
+              for k, v in sorted(method_probs.items(), key=lambda kv: -kv[1]) if k != method]
+    others_bit = f"; the alternatives score {', '.join(others)}" if others else ""
+    return (f"<p><strong>Synthesis method.</strong> The model predicts "
+            f"<strong>{_METHOD_LABELS.get(method, esc(method))}</strong> synthesis for "
+            f"{esc(formula)}{prob_bit}{others_bit}.</p>")
+
+
+def _precursor_paragraph(formula, p, esc):
+    """Prose for the composition-level precursor prediction: the parsed sets
+    when there are any, otherwise the model's top free-text answer."""
+    all_sets = p.get("precursors") or []
+    sets = [x for x in all_sets if x.get("precursors")]
+    domain_bit = ""
+    if p.get("in_domain") is False:
+        domain_bit = (' <span class="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[10px] font-bold" '
+                      'title="more elements than the precursor model was validated on">'
+                      'out of domain</span>')
+    if sets:
+        top = sets[0]
+        alts = [esc(" + ".join(x["precursors"])) for x in sets[1:]]
+        alt_bit = (f" Lower-ranked alternatives: "
+                   + "; ".join(f'<span class="font-mono">{a}</span>' for a in alts) + ".") if alts else ""
+        return (f"<p><strong>Precursors.</strong>{domain_bit} The top-ranked precursor set is "
+                f'<span class="font-mono">{esc(" + ".join(top["precursors"]))}</span>'
+                f"{_precursor_check(top, esc)}.{alt_bit}</p>")
+    raw = next((x.get("raw") for x in all_sets if x.get("raw")), None)
+    if not raw:
+        return (f"<p><strong>Precursors.</strong>{domain_bit} No precursor prediction is "
+                f"available for {esc(formula)}.</p>")
+    raw = raw.strip()
+    cut = "" if raw[-1:] in ".!?)" else "&hellip;"
+    return (f"<p><strong>Precursors.</strong>{domain_bit} None of the {len(all_sets)} "
+            f"beam-search outputs could be parsed into a precursor list; the model "
+            f"answered with a free-text synthesis description instead. The top-ranked "
+            f"output reads:</p>"
+            f'<blockquote class="border-l-2 border-slate-300 pl-3 text-slate-600 italic '
+            f'whitespace-pre-line">{esc(raw)}{cut}</blockquote>')
+
+
+def _synthesizability_section(summaries, esc):
+    """``(html, models_label)`` for the "Synthesizability" block -- one row per
+    (bulk, model) from ``summary["synthesizability"]``. ``("", None)`` when
+    SynthesizabilityScreenWorkChain wrote nothing for this composition, so
+    the block is simply absent.
+
+    Method and precursors are predicted from the composition, so when every
+    polymorph of a model agrees they are written once as prose above the
+    table instead of being repeated per row; the per-row columns come back
+    only if they actually differ. The model column is shown only when more
+    than one model ran (the model name is already in Pipeline Metadata)."""
+    if not any(s.get("synthesizability") for s in summaries):
+        return "", None
+
+    import json
+
+    predictions_all = [p for s in summaries for p in s.get("synthesizability") or []]
+    models = sorted({p["model"] for p in predictions_all})
+    show_model = len(models) > 1
+
+    def comp_key(p):
+        attrs = p.get("attributes") or {}
+        return json.dumps([p.get("method"), attrs.get("method_probabilities"),
+                           p.get("precursors"), p.get("in_domain")], sort_keys=True, default=str)
+
+    shared = {m: len({comp_key(p) for p in predictions_all if p["model"] == m}) == 1 for m in models}
+    per_row = not all(shared.values())
+
+    flag_rows = {}
+    for s in summaries:
+        for p in s.get("synthesizability") or []:
+            attrs = p.get("attributes") or {}
+            flags = []
+            if per_row and p.get("in_domain") is False:
+                flags.append('<span class="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[10px] font-bold" '
+                             'title="more elements than the precursor model was validated on">'
+                             'precursors out of domain</span>')
+            if attrs.get("selected_above_threshold"):
+                flags.append('<span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] font-bold" '
+                             'title="kept only because the phase diagram must return at least one bulk">'
+                             'above E<sub>hull</sub> threshold</span>')
+            for note in attrs.get("notes") or []:
+                flags.append(f'<span class="text-[10px] text-red-600">{esc(note)}</span>')
+            flag_rows[id(p)] = flags
+    show_notes = any(flag_rows.values())
+
+    n_cols = 5 + show_model + 2 * per_row + show_notes
+    rows = []
+    for s in summaries:
+        uid = s["structure_uuid"]
+        b = s["bulk"]
+        ehull_cell = f'{b["ehull"]:.4f}' if b else "&mdash;"
+        predictions = s.get("synthesizability") or []
+        if not predictions:
+            rows.append(
+                f'<tr class="border-t"><td class="px-4 py-3 font-mono text-xs">{esc(uid[:8])}</td>'
+                f'<td class="px-4 py-3">{ehull_cell}</td>'
+                f'<td class="px-4 py-3 text-slate-400 italic" colspan="{n_cols - 2}">not screened</td></tr>')
+            continue
+        for p in predictions:
+            score = p.get("score")
+            score_cell = f"{score:.3f}" if score is not None else "&mdash;"
+            unc = p.get("uncertainty")
+            unc_cell = f"{unc:.2f}" if unc is not None else "&mdash;"
+            label = p.get("label")
+            if label:
+                verdict_cell = (f'<span class="px-2 py-0.5 rounded {_SYNTH_BADGE.get(label, "bg-slate-100 text-slate-700")} '
+                                f'text-xs font-bold whitespace-nowrap">{esc(label)}</span>')
+            else:
+                verdict_cell = "&mdash;"
+            flags = flag_rows[id(p)]
+            cells = [f'<td class="px-4 py-3 font-mono text-xs" title="{esc(uid)}">{esc(uid[:8])}</td>',
+                     f'<td class="px-4 py-3">{ehull_cell}</td>']
+            if show_model:
+                cells.append(f'<td class="px-4 py-3">{esc(p["model"])}</td>')
+            cells += [f'<td class="px-4 py-3">{score_cell}</td>',
+                      f'<td class="px-4 py-3">{verdict_cell}</td>',
+                      f'<td class="px-4 py-3">{unc_cell}</td>']
+            if per_row:
+                cells += [f'<td class="px-4 py-3">{_method_cell(p, esc)}</td>',
+                          f'<td class="px-4 py-3">{_precursor_cell(p, esc)}</td>']
+            if show_notes:
+                cells.append('<td class="px-4 py-3"><div class="flex flex-col gap-1">'
+                             + "".join(flags) + "</div></td>")
+            rows.append('\n                      <tr class="border-t align-top">'
+                        + "".join(cells) + "</tr>")
+
+    headers = ["Bulk", "E<sub>hull</sub> (eV/atom)"]
+    if show_model:
+        headers.append("Model")
+    headers += ["P(synth.)", "Verdict", "Uncertainty (bits)"]
+    if per_row:
+        headers += ["Method", "Precursors"]
+    if show_notes:
+        headers.append("Notes")
+    header_html = "".join(f'<th class="px-4 py-3">{h}</th>' for h in headers)
+
+    thresholds = next((p["attributes"].get("thresholds") for p in predictions_all
+                       if p.get("attributes")), None) or {}
+    score_thr = thresholds.get("score")
+    unc_thr = thresholds.get("uncertainty_bits")
+    thr_bit = ""
+    if score_thr is not None and unc_thr is not None:
+        thr_bit = (f" Verdict: <em>synthesizable</em> if P &ge; {score_thr:g}, <em>uncertain</em> "
+                   f"if the entropy exceeds {unc_thr:g} bits.")
+
+    composition_html = ""
+    if not per_row:
+        formula = next(((p.get("attributes") or {}).get("formula") for p in predictions_all
+                        if (p.get("attributes") or {}).get("formula")), "this composition")
+        blocks = []
+        for m in models:
+            p = next(p for p in predictions_all if p["model"] == m)
+            head = (f'<p class="text-xs font-bold text-slate-400 uppercase tracking-wider">{esc(m)}</p>'
+                    if show_model else "")
+            blocks.append(head + _method_paragraph(formula, p, esc) + _precursor_paragraph(formula, p, esc))
+        composition_html = f"""
+            <div class="text-sm text-slate-700 space-y-3 mb-5">
+              <p class="text-slate-500">Method and precursors are predicted from the composition,
+                so every polymorph of {esc(formula)} shares them.</p>
+              {"".join(blocks)}
+            </div>"""
+        shared_note = ""
+    else:
+        shared_note = (" <strong>Method</strong> and <strong>precursors</strong> differ between "
+                       "polymorphs here, so they are listed per row.")
+
+    html = f"""
+        <section>
+          <div class="flex items-center gap-2 mb-4">
+            <i data-lucide="test-tube" class="w-5 h-5 text-primary"></i>
+            <h2 class="text-xl font-bold text-slate-900">Synthesizability</h2>
+          </div>
+          <div class="bg-white border rounded-xl p-6">
+            <div class="border-l-4 border-primary bg-blue-50 text-slate-700 text-sm rounded-r-lg p-4 mb-5 space-y-2">
+              <p>
+                Predicted for every bulk that passed the E<sub>above hull</sub> screen.
+                <strong>P(synth.)</strong> is the model's probability that the structure can be
+                made experimentally; <strong>uncertainty</strong> is its binary entropy
+                (0 = confident, 1 bit = coin flip).{thr_bit}{shared_note}
+              </p>
+              <p class="text-xs text-slate-500">
+                Advisory only &mdash; no structure is removed on this basis. Precursor sets are
+                element-checked against the target (&#10003; / &#9888;), not stoichiometry-balanced;
+                CSLLM's precursor model was validated on binary/ternary compounds, so larger systems
+                are marked out of domain.
+              </p>
+            </div>{composition_html}
+            <div class="overflow-x-auto border rounded-lg">
+              <table class="w-full text-sm text-left text-slate-700">
+                <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
+                  <tr>{header_html}</tr>
+                </thead>
+                <tbody>{"".join(rows)}</tbody>
+              </table>
+            </div>
+          </div>
+        </section>"""
+    return html, ", ".join(models)
+
+
+def _keep_unit_case(html_doc):
+    """Table headers and the small metadata labels are styled ``uppercase``,
+    which would print "eV" as "EV", "eta" as a capital Eta and
+    "E<sub>hull</sub>" as "E<sub>HULL</sub>". Inside every ``<th>`` and every
+    ``uppercase``-classed ``<p>``, wrap parenthesised units, ``&eta;`` and
+    lower-case subscripts in a ``normal-case`` span."""
+    import re
+
+    def fix(m):
+        inner = m.group(2)
+        inner = re.sub(r"(?<=\s)(\([^()]*\))", r'<span class="normal-case">\1</span>', inner)
+        inner = inner.replace("&eta;", '<span class="normal-case">&eta;</span>')
+        inner = re.sub(r"(<sub>[a-z][^<]*</sub>)", r'<span class="normal-case">\1</span>', inner)
+        return m.group(1) + inner + m.group(3)
+
+    html_doc = re.sub(r"(<th\b[^>]*>)(.*?)(</th>)", fix, html_doc, flags=re.S)
+    return re.sub(r'(<p class="[^"]*\buppercase\b[^"]*">)(.*?)(</p>)', fix, html_doc, flags=re.S)
+
+
 def render_html_report(chemical_formula, reaction, reaction_path, summaries=None,
                         output_path="report.html"):
     """Render a self-contained HTML report (layout mirrors ``result-sample.html``)
@@ -951,7 +1292,9 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
         if any(surf["best_candidate"] for surf in s["surfaces"]):
             fed_block = (f'<img src="{_fig_to_data_uri(plot_bulk_detail(s, reaction, reaction_path))}" '
                          f'alt="Reaction path diagrams for bulk {esc(uid[:8])}" '
-                         f'class="w-full rounded-lg border" />')
+                         # Capped at the width it had in the old 2/3 results column so the
+                         # wider page layout does not upscale the figure.
+                         f'class="block mx-auto w-full max-w-[729px] rounded-lg border" />')
         elif s["surfaces"]:
             fed_block = ('<p class="text-sm text-slate-400 italic">'
                          "no reaction-path candidates for this bulk's surfaces</p>")
@@ -1083,6 +1426,8 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
     else:
         light_section = ""
 
+    synth_section, synth_models = _synthesizability_section(summaries, esc)
+
     html_doc = f"""<!doctype html>
 <html lang="en">
   <head>
@@ -1099,7 +1444,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
 
   <body class="flex flex-col min-h-screen bg-slate-50">
     <div class="bg-white border-b px-6 py-6 sticky top-0 z-10">
-      <div class="max-w-7xl mx-auto flex flex-col gap-2">
+      <div class="max-w-screen-2xl mx-auto flex flex-col gap-2">
         <h1 class="text-slate-900 text-2xl font-bold tracking-tight">
           {esc(chemical_formula)} &mdash; {esc(reaction)} / {esc(reaction_path)}
         </h1>
@@ -1109,8 +1454,8 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
       </div>
     </div>
 
-    <div class="p-6 md:p-12 max-w-7xl mx-auto w-full grid grid-cols-1 lg:grid-cols-3 gap-8">
-      <div class="lg:col-span-2 flex flex-col gap-8">
+    <div class="p-6 md:p-12 max-w-screen-2xl mx-auto w-full grid grid-cols-1 lg:grid-cols-4 gap-8">
+      <div class="lg:col-span-3 flex flex-col gap-8">
 
         <section>
           <div class="flex items-center gap-2 mb-4">
@@ -1168,6 +1513,8 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
         </section>
 
         {light_section}
+
+        {synth_section}
 
         <section class="flex flex-col gap-6">
           <div class="flex items-center gap-2">
@@ -1235,6 +1582,15 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
               <div>
                 <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">Light Screen</p>
                 <p class="text-sm font-bold text-slate-900">{esc(screen_models) if electronic_present else "not run"}{f" &middot; {esc(screen_fidelity)}" if electronic_present and screen_fidelity else ""}</p>
+              </div>
+            </div>
+            <div class="flex items-center gap-4">
+              <div class="size-10 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0">
+                <i data-lucide="test-tube" class="w-6 h-6"></i>
+              </div>
+              <div>
+                <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">Synthesizability</p>
+                <p class="text-sm font-bold text-slate-900">{esc(synth_models) if synth_models else "not run"}</p>
               </div>
             </div>
           </div>
@@ -1330,6 +1686,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
         json.dump(raw_data(chemical_formula, reaction, reaction_path, summaries=summaries),
                    f, indent=2, default=str)
 
+    html_doc = _keep_unit_case(html_doc)
     with open(output_path, "w") as f:
         f.write(html_doc)
     return html_doc
