@@ -28,7 +28,7 @@
 		"mh = uvsib.codes.minimahopping.calculation:MinimaHoppingCalculation",
 		"sqs = uvsib.codes.sqs.calculation:SQSCalculation",
 		"electronic = uvsib.codes.electronic.calculation:ElectronicCalculation",
-		"synthesizability = uvsib.codes.synthesizability.calculation:SynthesizabilityCalculation"
+		"csllm = uvsib.codes.csllm.calculation:CSLLMCalculation"
 	],
 	"aiida.parsers": [
 		"mattergen_parser = uvsib.codes.mattergen.parser:MatterGenParser",
@@ -44,7 +44,7 @@
 		"sqs_parser = uvsib.codes.sqs.parser:SQSParser",
 		"electronic_parser = uvsib.codes.electronic.parser:ElectronicParser",
 		"generic_parser = uvsib.workchains.parser:GenericParser",
-		"synthesizability_parser = uvsib.codes.synthesizability.parser:SynthesizabilityParser"
+		"csllm_parser = uvsib.codes.csllm.parser:CSLLMParser"
 	],
 	"aiida.workflows": [
 		"mattergen.base = uvsib.codes.mattergen.workchain:MatterGenBaseWorkChain",
@@ -67,7 +67,7 @@
 		"surfacebuilder = uvsib.workchains.surface_builder:SurfaceBuilderWorkChain",
 		"opticalscreen = uvsib.workchains.optical_screen:OpticalScreenWorkChain",
 		"electronic = uvsib.codes.electronic.workchain:ElectronicWorkChain",
-		"synthesizability = uvsib.codes.synthesizability.workchain:SynthesizabilityWorkChain",
+		"csllm = uvsib.codes.csllm.workchain:CSLLMWorkChain",
 		"synthesizabilityscreen = uvsib.workchains.synthesizability_screen:SynthesizabilityScreenWorkChain",
 		"adsorbates = uvsib.workchains.adsorbates:AdsorbatesWorkChain",
 		"akmc = uvsib.workchains.akmc:AKMCWorkChain",

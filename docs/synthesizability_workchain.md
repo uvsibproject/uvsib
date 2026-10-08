@@ -1,4 +1,4 @@
-# SynthesizabilityScreenWorkChain / SynthesizabilityWorkChain maintainer notes
+# SynthesizabilityScreenWorkChain / CSLLMWorkChain maintainer notes
 
 This document explains the **CSLLM synthesizability screen**: what it predicts,
 how it is wired into the pipeline, which parameters control it, where results
@@ -23,11 +23,11 @@ phase diagram.
 
 | Code | Role |
 |---|---|
-| `workchains/synthesizability_screen.py` | `SynthesizabilityScreenWorkChain` — reads the ML bulk selection, submits one `SynthesizabilityWorkChain`, applies the label thresholds, writes `DBSynthesizability` rows. Entry point `synthesizabilityscreen`. |
-| `codes/synthesizability/workchain.py` | `SynthesizabilityWorkChain(BaseRestartWorkChain)` — runs `SynthesizabilityCalculation` with automatic restarts. Entry point `synthesizability` (in `aiida.workflows`). |
-| `codes/synthesizability/calculation.py` | `SynthesizabilityCalculation(CalcJob)` — stages `synthesizability.py`, retrieves `output.json`. Entry point `synthesizability` (in `aiida.calculations`). |
-| `codes/synthesizability/parser.py` | `SynthesizabilityParser` — `output.json` → `output_dict`. Entry point `synthesizability_parser`. |
-| `codes/files/synthesizability.py` | The staged runner: loads the LLaMA3-8B base once, attaches the three CSLLM LoRA adapters, and scores or generates. |
+| `workchains/synthesizability_screen.py` | `SynthesizabilityScreenWorkChain` — reads the ML bulk selection, submits one `CSLLMWorkChain`, applies the label thresholds, writes `DBSynthesizability` rows. Entry point `synthesizabilityscreen`. |
+| `codes/csllm/workchain.py` | `CSLLMWorkChain(BaseRestartWorkChain)` — runs `CSLLMCalculation` with automatic restarts. Entry point `csllm` (in `aiida.workflows`). |
+| `codes/csllm/calculation.py` | `CSLLMCalculation(CalcJob)` — stages `csllm.py`, retrieves `output.json`. Entry point `csllm` (in `aiida.calculations`). |
+| `codes/csllm/parser.py` | `CSLLMParser` — `output.json` → `output_dict`. Entry point `csllm_parser`. |
+| `codes/files/csllm.py` | The staged runner: loads the LLaMA3-8B base once, attaches the three CSLLM LoRA adapters, and scores or generates. |
 | `db/tables.py` | `DBSynthesizability` — one row per `(structure_uuid, synthesizability_model)`. |
 | `db/utils.py` | `upsert_synthesizability()` — a rerun replaces the previous row. |
 | `workchains/phase_diagram.py` | Hosts the `if_(should_run_synthesizability)` branch after the optical screen. |

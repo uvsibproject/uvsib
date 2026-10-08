@@ -5,9 +5,9 @@ A ``PhaseDiagramMLWorkChain`` branch (run after the optical screen, gated by
 selection -- the structures that passed the E_above_hull screen in
 ``store_stable_structs`` -- it:
 
-1. submits one ``SynthesizabilityWorkChain`` job that loads CSLLM once and
+1. submits one ``CSLLMWorkChain`` job that loads CSLLM once and
    predicts P(synthesizable), the synthesis method, and ranked precursor sets
-   (see ``codes/files/synthesizability.py``);
+   (see ``codes/files/csllm.py``);
 2. turns the raw probabilities into a label with the configured thresholds;
 3. writes one ``DBSynthesizability`` row per bulk.
 
@@ -124,7 +124,7 @@ class SynthesizabilityScreenWorkChain(WorkChain):
     def run_screen(self):
         _, weights_dir, device = get_model_device(MODEL_NAME)
         cfg = self.ctx.cfg
-        Workflow = WorkflowFactory("synthesizability")
+        Workflow = WorkflowFactory("csllm")
         builder = Workflow.get_builder()
         builder.input_structures = List(list=self.ctx.payload)
         builder.code = get_code(MODEL_NAME)

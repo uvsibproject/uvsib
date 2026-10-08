@@ -5,10 +5,10 @@ from aiida.common.datastructures import CalcInfo, CodeInfo
 from uvsib.workflows import settings
 
 
-class SynthesizabilityCalculation(CalcJob):
+class CSLLMCalculation(CalcJob):
     """AiiDA plugin for the CSLLM synthesizability / method / precursor screen.
 
-    Stages ``codes/files/synthesizability.py`` as ``aiida.py`` and runs it
+    Stages ``codes/files/csllm.py`` as ``aiida.py`` and runs it
     against the ``input_structures.json`` handed in through the ``file``
     namespace (see that script's docstring for the I/O contract). The CSLLM
     weights are read in place from ``--weights_dir`` on the remote machine.
@@ -28,7 +28,7 @@ class SynthesizabilityCalculation(CalcJob):
         parameters = self.inputs.parameters.get_dict()
         cmdline = parameters["cmdline_params"]
 
-        with open(os.path.join(settings.files_path, "synthesizability.py"), "r", encoding="utf-8") as f:
+        with open(os.path.join(settings.files_path, "csllm.py"), "r", encoding="utf-8") as f:
             content = f.read()
         with folder.open("aiida.py", "w", encoding="utf-8") as f:
             f.write(content)

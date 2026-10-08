@@ -33,7 +33,7 @@ Input (``input_structures.json``, staged via the ``file`` namespace):
 
     [{"uuid": <bulk structure uuid>, "structure": <pymatgen Structure.as_dict()>}, ...]
 
-Output (``output.json``, parsed into ``output_dict`` by ``synthesizability_parser``):
+Output (``output.json``, parsed into ``output_dict`` by ``csllm_parser``):
 
     {"results": [{"uuid", "formula", "material_string", "spacegroup",
                   "synthesizability": {"p_true", "label_mass", "entropy_bits"},

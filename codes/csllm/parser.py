@@ -4,8 +4,8 @@ from aiida.parsers import Parser
 from aiida.orm import Dict
 
 
-class SynthesizabilityParser(Parser):
-    """Parser for SynthesizabilityCalculation: ``output.json`` -> ``output_dict``."""
+class CSLLMParser(Parser):
+    """Parser for CSLLMCalculation: ``output.json`` -> ``output_dict``."""
 
     def parse(self, **kwargs):
         try:

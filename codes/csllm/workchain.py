@@ -17,7 +17,7 @@ def get_options():
             "num_cores_per_mpiproc": job_script["cpus"],
         },
         "max_wallclock_seconds": job_script["time"],
-        "parser_name": "synthesizability_parser",
+        "parser_name": "csllm_parser",
     }
     if job_script.get("exclusive"):
         options["custom_scheduler_commands"] = "#SBATCH --exclusive"
@@ -25,7 +25,7 @@ def get_options():
 
 
 def get_cmdline(job_info):
-    """Build the ``synthesizability.py`` CLI from the workchain ``job_info`` dict."""
+    """Build the ``csllm.py`` CLI from the workchain ``job_info`` dict."""
     return [
         f"--weights_dir={job_info['weights_dir']}",
         f"--device={job_info['device']}",
@@ -48,14 +48,14 @@ def get_structures_file(structures):
     return SinglefileData(file=file_path)
 
 
-SynthesizabilityCalculation = CalculationFactory("synthesizability")
+CSLLMCalculation = CalculationFactory("csllm")
 
 
-class SynthesizabilityWorkChain(BaseRestartWorkChain):
-    """Run SynthesizabilityCalculation (CSLLM screen) with automatic restarts,
+class CSLLMWorkChain(BaseRestartWorkChain):
+    """Run CSLLMCalculation (synthesizability screen) with automatic restarts,
     mirroring ElectronicWorkChain."""
 
-    _process_class = SynthesizabilityCalculation
+    _process_class = CSLLMCalculation
 
     @classmethod
     def define(cls, spec):
@@ -64,7 +64,7 @@ class SynthesizabilityWorkChain(BaseRestartWorkChain):
         spec.input("code", valid_type=Code)
         spec.input("job_info", valid_type=Dict)
         spec.input("local_label", valid_type=Str)
-        spec.expose_outputs(SynthesizabilityCalculation)
+        spec.expose_outputs(CSLLMCalculation)
 
         spec.outline(
             cls.setup,
@@ -76,7 +76,7 @@ class SynthesizabilityWorkChain(BaseRestartWorkChain):
         )
 
         spec.exit_code(400, "ERROR_MAX_RESTARTS_EXCEEDED",
-                       message="Maximum number of restarts exceeded for SynthesizabilityWorkChain.")
+                       message="Maximum number of restarts exceeded for CSLLMWorkChain.")
 
     def setup(self):
         super().setup()
@@ -86,11 +86,11 @@ class SynthesizabilityWorkChain(BaseRestartWorkChain):
             "code": self.inputs.code,
             "file": {"input_structures_file": get_structures_file(self.inputs.input_structures)},
             "parameters": Dict(dict={
-                "job_type": "synthesizability",
+                "job_type": "csllm",
                 "cmdline_params": get_cmdline(job_info),
             }),
             "metadata": {
                 "options": get_options(),
-                "label": "Synthesizability: {}".format(self.inputs.local_label.value),
+                "label": "CSLLM: {}".format(self.inputs.local_label.value),
             },
         }
