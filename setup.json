@@ -62,6 +62,8 @@
 		"mpdbml = uvsib.workchains.mpdb_ml:MPDBMLWorkChain",
 		"phasediagram = uvsib.workchains.phase_diagram:PhaseDiagramMLWorkChain",
 		"ehulluncertainty = uvsib.workchains.uncertainty:EhullUncertaintyWorkChain",
+		"surfaceuncertainty = uvsib.workchains.uncertainty_surface:SurfaceUncertaintyWorkChain",
+		"adsorptionuncertainty = uvsib.workchains.uncertainty_surface:AdsorptionUncertaintyWorkChain",
 		"bandalignment = uvsib.workchains.band_alignment:BandAlignmentWorkChain",
 		"csp = uvsib.workchains.csp:CSPWorkChain",
 		"gen = uvsib.workchains.gen:GeneratorWorkChain",

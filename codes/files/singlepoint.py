@@ -6,14 +6,22 @@ to the same geometry. Shipped as ``aiida.py`` next to ``_calculators.py`` like
 ``relax.py``; the job runs in the committee model's own code / environment.
 
 Input (``input_structures.json``)
-    [{"uuid": <structure uuid>, "structure": <pymatgen Structure.as_dict()>,
+    [{"uuid": <structure uuid / any record key>,
+      "structure": <pymatgen Structure.as_dict()>,   # bulk / slab, or
+      "atoms": <ase.io.jsonio-encoded Atoms>,         # adsorbate systems, gas cells
+      "n_ads": <adsorbate atoms (last n_ads), optional>,
       "index": <input position>}, ...]
+
+``atoms`` keeps the ASE constraints (FixAtoms on the bottom slab layers), so
+fixed atoms report zero force and do not enter the force measures.
 
 Output (``output.json``)
     {
-      "results": [{"uuid", "index", "energy", "epa",
+      "results": [{"uuid", "index", "energy", "epa", "n_atoms",
                    "max_force",      # max |F_i|, eV/A
                    "force_sq_mean",  # sum_i |F_i|^2 / N, eV^2/A^2
+                   "force_sq_sum",   # sum_i |F_i|^2, eV^2/A^2
+                   "max_force_ads",  # max |F_i| on the last n_ads atoms (None without n_ads)
                    "stress_voigt",   # [xx, yy, zz, yz, xz, xy], GPa (None if unavailable)
                    "max_stress",     # max |sigma_voigt|, GPa (None if unavailable)
                    "pressure"},      # -trace(sigma)/3, GPa (None if unavailable)
@@ -30,6 +38,7 @@ import argparse
 import numpy as np
 from pymatgen.core import Structure
 from ase import Atoms
+from ase.io import jsonio
 
 EV_A3_TO_GPA = 160.21766208
 
@@ -42,8 +51,8 @@ def pmg_to_ase(pmg_structure):
     return Atoms(symbols=symbols, scaled_positions=scaled_positions, cell=cell, pbc=True)
 
 
-def evaluate(atoms):
-    """Energy, max force and stress of ``atoms`` with its attached calculator."""
+def evaluate(atoms, n_ads=None):
+    """Energy, forces and stress of ``atoms`` with its attached calculator."""
     energy = float(atoms.get_potential_energy())
     if not np.isfinite(energy):
         raise ValueError("non-finite energy")
@@ -51,6 +60,9 @@ def evaluate(atoms):
     force_norms = np.linalg.norm(forces, axis=1)
     max_force = float(np.max(force_norms)) if len(forces) else 0.0
     force_sq_mean = float(np.mean(force_norms ** 2)) if len(forces) else 0.0
+    force_sq_sum = float(np.sum(force_norms ** 2))
+    max_force_ads = (float(np.max(force_norms[-n_ads:]))
+                     if n_ads and 0 < n_ads <= len(force_norms) else None)
     try:
         stress = np.asarray(atoms.get_stress(voigt=True)) * EV_A3_TO_GPA
         stress_voigt = [float(x) for x in stress]
@@ -61,8 +73,11 @@ def evaluate(atoms):
     return {
         "energy": energy,
         "epa": energy / len(atoms),
+        "n_atoms": len(atoms),
         "max_force": max_force,
         "force_sq_mean": force_sq_mean,
+        "force_sq_sum": force_sq_sum,
+        "max_force_ads": max_force_ads,
         "stress_voigt": stress_voigt,
         "max_stress": max_stress,
         "pressure": pressure,
@@ -80,9 +95,12 @@ def run_singlepoints(calc):
         uuid = item.get("uuid")
         index = item.get("index", pos)
         try:
-            atoms = pmg_to_ase(Structure.from_dict(item["structure"]))
+            if "atoms" in item:
+                atoms = jsonio.decode(item["atoms"])
+            else:
+                atoms = pmg_to_ase(Structure.from_dict(item["structure"]))
             atoms.calc = calc
-            record = evaluate(atoms)
+            record = evaluate(atoms, item.get("n_ads"))
             record.update({"uuid": uuid, "index": index})
             results.append(record)
         except Exception as e:  # noqa: BLE001 -- log + continue per structure

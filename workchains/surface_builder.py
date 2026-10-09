@@ -3,9 +3,9 @@ from collections import Counter
 import json
 import tempfile
 import yaml
-from aiida.engine import WorkChain
+from aiida.engine import WorkChain, if_
 from aiida.orm import Str, Dict, SinglefileData
-from aiida.plugins import CalculationFactory
+from aiida.plugins import CalculationFactory, WorkflowFactory
 from uvsib.db.tables import DBComposition
 from uvsib.db.utils import query_structure, add_slab, query_by_columns
 from uvsib.workchains.utils import get_code, get_model_device
@@ -140,6 +140,10 @@ class SurfaceBuilderWorkChain(WorkChain):
             cls.run_relax,
             cls.inspect_relax,
             cls.store_results,
+            if_(cls.should_run_uncertainty)(
+                cls.run_uncertainty,
+                cls.inspect_uncertainty
+            ),
             cls.final_report
         )
 
@@ -335,6 +339,27 @@ class SurfaceBuilderWorkChain(WorkChain):
                 add_slab(uuid_str, self.ctx.chemical_formula, slab,
                          head=settings.inputs['face_build'].get('head'),
                          formation_energy=surface_formation_energy)
+
+    def should_run_uncertainty(self):
+        """Committee surface-energy uncertainty (SurfaceUncertaintyWorkChain).
+        Opt-in via ``settings.SURFACE_UNCERTAINTY_ENABLED``."""
+        return settings.SURFACE_UNCERTAINTY_ENABLED
+
+    def run_uncertainty(self):
+        """Submit SurfaceUncertaintyWorkChain for the stored slabs."""
+        Workflow = WorkflowFactory("surfaceuncertainty")
+        builder = Workflow.get_builder()
+        builder.chemical_formula = Str(self.ctx.chemical_formula)
+        self.to_context(**{"uncertainty": self.submit(builder)})
+
+    def inspect_uncertainty(self):
+        """Advisory stage: never fail the surface builder on the uncertainty analysis."""
+        wch = self.ctx.uncertainty
+        if not wch.is_finished_ok:
+            self.report(f"SurfaceUncertaintyWorkChain did not finish OK (exit {wch.exit_status}); "
+                        "continuing without surface-energy uncertainty.")
+            return
+        self.report("SurfaceUncertaintyWorkChain finished; uncertainty written for the stored slabs.")
 
     def final_report(self):
         """Final report"""

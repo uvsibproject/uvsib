@@ -1,5 +1,5 @@
 from ase.io import jsonio
-from aiida.engine import WorkChain
+from aiida.engine import WorkChain, if_
 from aiida.plugins import WorkflowFactory
 from aiida.orm import Str, List, Dict
 from uvsib.db.tables import DBSurface
@@ -16,6 +16,19 @@ from uvsib.workchains.orr import calculate_orr_overpotential
 from uvsib.workflows import settings
 
 MAX_NUM_ADS = settings.MAX_NUM_ADS
+
+# reaction -> (overpotential calculator, eta storage threshold in V); shared
+# with AdsorptionUncertaintyWorkChain so committee models go through exactly
+# the same CHE bookkeeping
+REACTION_FUNCTIONS = {
+    "OER": (calculate_oer_overpotential, 2.0),
+    "CO2RR": (calculate_co2rr_overpotential, 2.0),
+    "CER": (calculate_cer_overpotential, 2.0),
+    "NRR": (calculate_nrr_overpotential, 2.0),
+    "NOXRR": (calculate_noxrr_overpotential, 2.0),
+    "HER": (calculate_her_overpotential, 2.0),
+    "ORR": (calculate_orr_overpotential, 2.0)
+}
 
 def get_structure_uuid_surface_id(chemical_formula):
     """
@@ -39,6 +52,10 @@ class AdsorbatesWorkChain(WorkChain):
             cls.run_adsorbs,
             cls.inspect_adsorbs,
             cls.store_results_ml,
+            if_(cls.should_run_uncertainty)(
+                cls.run_uncertainty,
+                cls.inspect_uncertainty
+            ),
             cls.final_report
         )
 
@@ -102,15 +119,7 @@ class AdsorbatesWorkChain(WorkChain):
 
     def store_results_ml(self):
         """Store ML results """
-        reaction_map = {
-            "OER": (calculate_oer_overpotential, 2.0),
-            "CO2RR": (calculate_co2rr_overpotential, 2.0),
-            "CER": (calculate_cer_overpotential, 2.0),
-            "NRR": (calculate_nrr_overpotential, 2.0),
-            "NOXRR": (calculate_noxrr_overpotential, 2.0),
-            "HER": (calculate_her_overpotential, 2.0),
-            "ORR": (calculate_orr_overpotential, 2.0)
-        }
+        reaction_map = REACTION_FUNCTIONS
 
         if self.ctx.reaction not in reaction_map:
             self.report(f"The reaction {self.ctx.reaction} is not known")
@@ -159,6 +168,29 @@ class AdsorbatesWorkChain(WorkChain):
                                          site_type=site_type, ads_coord=ads_coord, repeat=repeat,
                                          e=eta, dG_steps=dG_steps, dG_cumulative=dG_cumulative,
                                          ad_set=adsorb_set)
+
+    def should_run_uncertainty(self):
+        """Committee eta uncertainty (AdsorptionUncertaintyWorkChain). Opt-in via
+        ``settings.ADSORPTION_UNCERTAINTY_ENABLED``; needs stored candidates."""
+        return settings.ADSORPTION_UNCERTAINTY_ENABLED and self.ctx.candidates > 0
+
+    def run_uncertainty(self):
+        """Submit AdsorptionUncertaintyWorkChain for the stored candidates."""
+        Workflow = WorkflowFactory("adsorptionuncertainty")
+        builder = Workflow.get_builder()
+        builder.chemical_formula = Str(self.ctx.chemical_formula)
+        builder.reaction = Str(self.ctx.reaction)
+        builder.reaction_path = Str(self.ctx.reaction_path)
+        self.to_context(**{"uncertainty": self.submit(builder)})
+
+    def inspect_uncertainty(self):
+        """Advisory stage: never fail the adsorbates workchain on the uncertainty analysis."""
+        wch = self.ctx.uncertainty
+        if not wch.is_finished_ok:
+            self.report(f"AdsorptionUncertaintyWorkChain did not finish OK (exit {wch.exit_status}); "
+                        "continuing without eta uncertainty.")
+            return
+        self.report("AdsorptionUncertaintyWorkChain finished; uncertainty written for the stored candidates.")
 
     def final_report(self):
         """Final report"""

@@ -94,6 +94,7 @@ from collections import defaultdict
 
 from uvsib.db.tables import DBComposition, DBSurface, DBSurfaceMLAdsorbate, DBSynthesizability
 from uvsib.db.utils import query_by_columns, query_structure
+from uvsib.workchains.surface_uncertainty import adsorption_bulk_summary
 
 
 def _bulk_source(structure_uuid, method=None):
@@ -173,6 +174,20 @@ def _slab_area(slab):
     return (cx ** 2 + cy ** 2 + cz ** 2) ** 0.5
 
 
+def _analysed(attributes, key):
+    """The committee ``uncertainty`` blob of a DBSurface / DBSurfaceMLAdsorbate
+    row once the analysis has run on it (``key`` present), else ``None``."""
+    unc = (attributes or {}).get("uncertainty") or {}
+    return unc if key in unc else None
+
+
+def surface_uncertainty_summary(chemical_formula):
+    """``DBComposition.stable_struct["surface_uncertainty"]`` (run settings +
+    per-bulk facet-ranking agreement), or ``None``."""
+    rows = query_by_columns(DBComposition, {"composition": chemical_formula})
+    return ((rows[0].stable_struct or {}).get("surface_uncertainty") if rows else None) or None
+
+
 def surfaces_for_bulk(chemical_formula):
     """DBSurface rows for ``chemical_formula``, grouped by bulk structure_uuid
     and ranked within each bulk by ascending surface formation energy (most
@@ -188,6 +203,7 @@ def surfaces_for_bulk(chemical_formula):
             "n_atoms": len(slab.get("sites") or []),
             "area": _slab_area(slab),
             "shift": slab.get("shift"),
+            "uncertainty": _analysed(row.attributes, "gamma_std"),
         })
     for surfaces in by_uuid.values():
         surfaces.sort(key=lambda s: s["formation_energy"]
@@ -280,6 +296,7 @@ def reaction_results(chemical_formula, reaction, reaction_path):
             "dG_cumulative": row.dG_cumulative,
             "repeat": _parse_repeat(row.repeat),
             "coverage": _coverage(row.repeat),
+            "uncertainty": _analysed(row.attributes, "eta_std"),
         })
     for candidates in by_uuid.values():
         candidates.sort(key=lambda c: c["eta"])
@@ -424,6 +441,7 @@ def summarize(chemical_formula, reaction, reaction_path):
     results_by_uuid = reaction_results(chemical_formula, reaction, reaction_path)
     electronic_by_uuid = electronic_for_bulk(chemical_formula)
     synthesizability_by_uuid = synthesizability_for_bulk(chemical_formula)
+    surface_unc = surface_uncertainty_summary(chemical_formula) or {}
 
     all_uuids = set(bulks) | set(surfaces_by_uuid) | set(results_by_uuid)
     summaries = []
@@ -441,6 +459,13 @@ def summarize(chemical_formula, reaction, reaction_path):
             surf["reaction_candidates"] = surf_candidates
             surf["best_candidate"] = surf_candidates[0] if surf_candidates else None
 
+        # per-bulk adsorption agreement, derived from the per-row results (the
+        # adsorption analysis stores nothing composition-wide)
+        analysed = {str(c["row_id"]): c["uncertainty"] for c in candidates if c.get("uncertainty")}
+        adsorption_meta = next(iter(analysed.values()), {}).get("meta") if analysed else None
+        adsorption_bulk = (adsorption_bulk_summary(analysed, adsorption_meta["primary"]).get(uid)
+                           if adsorption_meta else None)
+
         summaries.append({
             "structure_uuid": uid,
             "bulk": bulks.get(uid),
@@ -452,6 +477,11 @@ def summarize(chemical_formula, reaction, reaction_path):
             "best_candidate": candidates[0] if candidates else None,
             "electronic": electronic_by_uuid.get(uid),
             "synthesizability": synthesizability_by_uuid.get(uid, []),
+            "surface_uncertainty": (surface_unc.get("per_bulk") or {}).get(uid),
+            "surface_uncertainty_meta": ({k: v for k, v in surface_unc.items() if k != "per_bulk"}
+                                         if surface_unc else None),
+            "adsorption_uncertainty": adsorption_bulk,
+            "adsorption_uncertainty_meta": adsorption_meta,
         })
 
     summaries.sort(key=lambda s: (s["bulk"] is None,
@@ -487,11 +517,13 @@ def _require_matplotlib():
 
 
 def plot_free_energy_diagram(dg_cumulative, labels=None, equilibrium_potential=None,
-                              title=None, ax=None):
+                              title=None, ax=None, committee=None):
     """Staircase free-energy diagram for one candidate's ``dG_cumulative``
     (the same values AdsorbatesWorkChain derived eta from). The
     potential-determining step -- the single largest rise, which sets eta -- is
-    highlighted in red."""
+    highlighted in red. ``committee`` ({model: dG_cumulative}, from the
+    adsorption uncertainty analysis) overlays each committee MLIP's diagram as
+    thin lines."""
     plt = _require_matplotlib()
 
     dg_cumulative = list(dg_cumulative)
@@ -512,6 +544,19 @@ def plot_free_energy_diagram(dg_cumulative, labels=None, equilibrium_potential=N
         ax.plot([i + 0.3, i + 1 - 0.3], [dg_cumulative[i], dg_cumulative[i + 1]],
                 linestyle="--", linewidth=2,
                 color="crimson" if i == pds_index else "gray")
+
+    if committee:
+        styles = [("darkorange", ":"), ("purple", "-."), ("teal", (0, (5, 2))), ("olive", ":")]
+        for k, (model, dg_m) in enumerate(sorted(committee.items())):
+            color, ls = styles[k % len(styles)]
+            dg_m = list(dg_m)
+            for i, g in enumerate(dg_m):
+                ax.hlines(g, i - 0.3, i + 0.3, linewidth=1.5, color=color, linestyle=ls,
+                          label=model if i == 0 else None)
+            for i in range(len(dg_m) - 1):
+                ax.plot([i + 0.3, i + 1 - 0.3], [dg_m[i], dg_m[i + 1]], linewidth=0.8,
+                        color=color, linestyle=ls)
+        ax.legend(fontsize=8, loc="best")
 
     ax.set_xticks(range(n))
     ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=11)
@@ -704,10 +749,17 @@ def plot_surface_fed(surface, reaction, reaction_path, ax=None):
             [str(i) for i in range(len(best["dG_cumulative"]))]
         coverage_bit = _coverage_label(best.get("repeat"))
         coverage_bit = f", {coverage_bit}" if coverage_bit else ""
+        unc = best.get("uncertainty")
+        committee = None
+        eta_bit = f"{best['eta']:.2f} V"
+        if unc:
+            primary = (unc.get("meta") or {}).get("primary")
+            committee = {m: v for m, v in unc["dG_cumulative"].items() if m != primary}
+            eta_bit = f"{best['eta']:.2f} ± {unc['eta_std']:.2f} V"
         plot_free_energy_diagram(
             best["dG_cumulative"], labels=labels,
-            title=f"{miller}  site={best['site_type']}, eta={best['eta']:.2f} V{coverage_bit}",
-            ax=ax,
+            title=f"{miller}  site={best['site_type']}, eta={eta_bit}{coverage_bit}",
+            ax=ax, committee=committee,
         )
 
     if own_fig:
@@ -1387,6 +1439,263 @@ def _uncertainty_section(summaries, esc):
         </section>"""
 
 
+_COMMITTEE_GEOMETRY_TEXT = {"slab": "geometry (slab)", "bulk": "geometry (bulk)",
+                            "adsorbate": "geometry (adsorbate)", "gas": "geometry (gas)"}
+_COMMITTEE_LABEL_TITLES = {
+    "surface": {"robust": "same facet rank within the bulk under every MLIP",
+                "uncertain": "the MLIPs rank this facet differently within the bulk"},
+    "adsorption": {"robust": "std(eta) within the tolerance and the same potential-determining "
+                             "step under every MLIP",
+                   "uncertain": "std(eta) above the tolerance or the potential-determining step "
+                                "differs between MLIPs"},
+}
+
+
+def _committee_badge(unc, esc, kind):
+    """Label badge of a surface (``kind="surface"``) or reaction candidate
+    (``kind="adsorption"``) committee analysis; ``""`` if none."""
+    if not unc or not unc.get("label"):
+        return ""
+    label = unc["label"]
+    css, text, title = _STABILITY_BADGES.get(label, ("bg-slate-100 text-slate-600", label, ""))
+    if label == "geometry_disagreement":
+        text = _COMMITTEE_GEOMETRY_TEXT.get(unc.get("geometry_source"), "geometry")
+        unit, scale = ("eV/Å²", 1.0) if kind == "surface" else ("V", 1.0)
+        title = (f"relaxing on {unc.get('geometry_shift_model')} could shift the value by up to "
+                 f"{unc['geometry_shift_max'] * scale:.4g} {unit} "
+                 f"(limit {unc['geometry_limit'] * scale:.4g} {unit} = max(spread, floor))")
+        via = _committee_via_text(unc, kind)
+        if via:
+            title += f"; dominated by {via}"
+    else:
+        title = _COMMITTEE_LABEL_TITLES[kind].get(label, title)
+    return (f'<span class="px-2 py-0.5 rounded {css} text-xs font-bold" '
+            f'title="{esc(title)}">{esc(text)}</span>')
+
+
+def _committee_via_text(unc, kind):
+    """Structure dominating a flagged geometry shift: ``"*COOH (UMA)"`` for a
+    candidate, ``"slab (UMA)"`` / ``"bulk (UMA)"`` for a surface."""
+    if kind == "surface":
+        model = unc.get("geometry_shift_model")
+        return f'{unc.get("geometry_source")} ({model})' if model else ""
+    via = unc.get("geometry_via") or {}
+    return f'{via.get("species")} ({via.get("model")})' if via.get("model") else ""
+
+
+def _committee_methods(unc, meta):
+    """Primary first, then the committee in config order, restricted to the
+    models present in this result."""
+    order = [meta["primary"]] + [m["model"] for m in meta.get("committee", [])]
+    present = set(unc.get("gamma") or unc.get("eta") or {})
+    return [m for m in order if m in present]
+
+
+def _gamma_cell(surf, meta, esc):
+    """Surface energy cell: primary gamma, &plusmn; std over all MLIPs, per-model tooltip."""
+    fe = surf["formation_energy"]
+    if fe is None:
+        return "&mdash;"
+    unc = surf.get("uncertainty")
+    if not unc or not meta:
+        return f"{fe:.4f}"
+    per_model = " · ".join(f'{m} {unc["gamma"][m]:.4f}' for m in _committee_methods(unc, meta))
+    return (f'<span title="{esc(per_model + " (eV/Å²)")}">{fe:.4f} &plusmn; '
+            f'{unc["gamma_std"]:.4f}</span>')
+
+
+def _eta_cell(best, esc):
+    """Best-eta cell: primary eta, &plusmn; std over all MLIPs, label badge."""
+    if not best:
+        return "&mdash;"
+    unc = best.get("uncertainty")
+    if not unc:
+        return f'{best["eta"]:.3f} V'
+    meta = unc.get("meta") or {}
+    per_model = " · ".join(f'{m} {unc["eta"][m]:.3f}' for m in _committee_methods(unc, meta)) if meta else ""
+    via = ""
+    if unc.get("geometry_disagreement"):
+        via = (f'<br><span class="text-xs text-slate-500">via '
+               f'{esc(_committee_via_text(unc, "adsorption"))}</span>')
+    return (f'<span title="{esc(per_model + " (V)")}">{best["eta"]:.3f} &plusmn; {unc["eta_std"]:.3f} V</span>'
+            f'<br>{_committee_badge(unc, esc, "adsorption")}{via}')
+
+
+def _surface_name(summary, surface_id):
+    for surf in summary["surfaces"]:
+        if str(surf["surface_id"]) == str(surface_id):
+            miller = tuple(surf["miller_index"]) if surf["miller_index"] else "?"
+            return f"{surface_id} {miller}"
+    return str(surface_id)
+
+
+def _candidate_name(summary, row_id):
+    for c in summary["reaction_candidates"]:
+        if str(c["row_id"]) == str(row_id):
+            miller = tuple(c["miller_index"]) if c["miller_index"] else "?"
+            return f"{miller} {c['site_type']}"
+    return str(row_id)
+
+
+def _agreement_bit(agree, picks, primary, name_fn):
+    """"same under all MLIPs" or the models that pick something else."""
+    if agree:
+        return '<span class="text-green-700 font-semibold">same under all MLIPs</span>'
+    others = [f"{m} &rarr; {name_fn(v)}" for m, v in picks.items() if v != picks.get(primary)]
+    return ('<span class="text-amber-700 font-semibold">differs</span> '
+            f'(primary {name_fn(picks.get(primary))}; {"; ".join(others)})')
+
+
+def _committee_note(summary, esc):
+    """One line under a bulk's surfaces table: does the committee agree on the
+    lowest-gamma facet, the facets carried to adsorption and the best candidate?"""
+    bits = []
+    surf_bulk, surf_meta = summary.get("surface_uncertainty"), summary.get("surface_uncertainty_meta")
+    if surf_bulk and surf_meta:
+        name = lambda sid: esc(_surface_name(summary, sid))
+        bits.append("Lowest-&gamma; facet: " + _agreement_bit(
+            surf_bulk["top1_agree"], surf_bulk["top1"], surf_meta["primary"], name))
+        bits.append(f"Facets carried to adsorption (lowest {surf_meta.get('n_selected')}): " + (
+            '<span class="text-green-700 font-semibold">same under all MLIPs</span>'
+            if surf_bulk["selected_agree"] else '<span class="text-amber-700 font-semibold">differ</span>'))
+    ads_bulk, ads_meta = summary.get("adsorption_uncertainty"), summary.get("adsorption_uncertainty_meta")
+    if ads_bulk and ads_meta:
+        name = lambda rid: esc(_candidate_name(summary, rid))
+        bits.append("Best candidate: " + _agreement_bit(
+            ads_bulk["best_agree"], ads_bulk["best"], ads_meta["primary"], name))
+    if not bits:
+        return ""
+    return ('<p class="text-xs text-slate-600 -mt-4 mb-6">'
+            + " &nbsp;|&nbsp; ".join(bits) + "</p>")
+
+
+def _surface_adsorption_section(summaries, esc):
+    """"Surface &amp; Adsorption Uncertainty" section: one row per bulk with the
+    committee agreement on facets and on the best reaction candidate. ``""``
+    when neither analysis ran."""
+    rows_with = [s for s in summaries if s.get("surface_uncertainty") or s.get("adsorption_uncertainty")]
+    if not rows_with:
+        return ""
+    surf_meta = next((s["surface_uncertainty_meta"] for s in summaries if s.get("surface_uncertainty_meta")), None)
+    ads_meta = next((s["adsorption_uncertainty_meta"] for s in summaries if s.get("adsorption_uncertainty_meta")), None)
+
+    rows = []
+    for s in rows_with:
+        uid = s["structure_uuid"]
+        surf_bulk = s.get("surface_uncertainty")
+        gammas = [surf["uncertainty"]["gamma_std"] for surf in s["surfaces"] if surf.get("uncertainty")]
+        if surf_bulk:
+            top1 = ('<span class="text-green-700 font-semibold">yes</span>' if surf_bulk["top1_agree"]
+                    else '<span class="text-amber-700 font-semibold">no</span>')
+            selected = ('<span class="text-green-700 font-semibold">yes</span>' if surf_bulk["selected_agree"]
+                        else '<span class="text-amber-700 font-semibold">no</span>')
+        else:
+            top1 = selected = "&mdash;"
+        gamma_cell = f"{min(gammas):.4f}&ndash;{max(gammas):.4f}" if gammas else "&mdash;"
+
+        ads_bulk = s.get("adsorption_uncertainty")
+        best = s.get("best_candidate")
+        best_unc = best.get("uncertainty") if best else None
+        if best_unc and ads_meta:
+            methods = _committee_methods(best_unc, ads_meta)
+            eta_models = " / ".join(f'{best_unc["eta"][m]:.2f}' for m in methods)
+            eta_cell = f'<span title="{esc(" / ".join(methods))}">{eta_models}</span>'
+            eta_std = f'{best_unc["eta_std"]:.3f}'
+            badge = _committee_badge(best_unc, esc, "adsorption")
+        else:
+            eta_cell = eta_std = badge = "&mdash;"
+        if ads_bulk:
+            stays = ('<span class="text-green-700 font-semibold">yes</span>' if ads_bulk["best_agree"]
+                     else '<span class="text-amber-700 font-semibold">no</span>')
+        else:
+            stays = "&mdash;"
+        rows.append(f"""
+                  <tr class="border-t">
+                    <td class="px-4 py-3 font-mono text-xs" title="{esc(uid)}">{esc(uid[:8])}</td>
+                    <td class="px-4 py-3">{top1}</td>
+                    <td class="px-4 py-3">{selected}</td>
+                    <td class="px-4 py-3">{gamma_cell}</td>
+                    <td class="px-4 py-3">{eta_cell}</td>
+                    <td class="px-4 py-3">{eta_std}</td>
+                    <td class="px-4 py-3">{stays}</td>
+                    <td class="px-4 py-3">{badge or "&mdash;"}</td>
+                  </tr>""")
+
+    meta = surf_meta or ads_meta
+    order = " / ".join([meta["primary"]] + [m["model"] for m in meta.get("committee", [])])
+    committee_bit = ", ".join(
+        f'{esc(m["model"])}' + (f' ({esc(m["head"])})' if m.get("head") else "")
+        for m in meta.get("committee", []))
+    k = _fmt(meta.get("force_constant"), 1)
+    gamma_floor = _fmt(surf_meta.get("gamma_floor") if surf_meta else None, 4)
+    eta_floor = _fmt(ads_meta.get("eta_floor") if ads_meta else None, 2)
+    eta_tol = _fmt(ads_meta.get("eta_tolerance") if ads_meta else None, 2)
+
+    return f"""
+        <section>
+          <div class="flex items-center gap-2 mb-4">
+            <i data-lucide="activity" class="w-5 h-5 text-primary"></i>
+            <h2 class="text-xl font-bold text-slate-900">Surface &amp; Adsorption Uncertainty</h2>
+          </div>
+          <div class="bg-white border rounded-xl p-6">
+            <div class="border-l-4 border-primary bg-blue-50 text-slate-700 text-sm rounded-r-lg p-4 mb-5 space-y-2">
+              <p>
+                Surface energies and overpotentials of the primary MLIP (<strong>{esc(meta['primary'])}</strong>)
+                re-scored by a committee of {committee_bit}: <strong>single points on the
+                {esc(meta['primary'])}-relaxed slabs, adsorbate systems and gas references</strong>.
+                Each quantity is computed entirely within one model, with the same formulas the pipeline uses:
+              </p>
+              <div class="bg-white border rounded-lg px-4 py-3 font-mono text-xs leading-6 overflow-x-auto">
+                &gamma;<sub>m</sub> = (E<sub>slab,m</sub> &minus; N<sub>slab</sub> &middot; &epsilon;<sub>bulk,m</sub>) / (2A)<br>
+                &eta;<sub>m</sub>, &Delta;G<sub>i,m</sub> = the reaction's CHE function on model m's energies
+                (same ZPE, references and pinning)<br>
+                &delta;&gamma;<sub>m</sub> = [ &Sigma;<sub>i</sub>|F<sub>i</sub>|<sup>2</sup><sub>slab</sub> / (2k)
+                  + N<sub>slab</sub> &middot; &lang;|F|<sup>2</sup>&rang;<sub>bulk</sub> / (2k) ] / (2A)<br>
+                &delta;&eta;<sub>m</sub> = max<sub>i</sub> &Sigma;<sub>s</sub> |&part;&Delta;G<sub>i</sub>/&part;E<sub>s</sub>|
+                  &middot; &Sigma;<sub>j</sub>|F<sub>j</sub>|<sup>2</sup><sub>s</sub> / (2k)<br>
+                geometry flag: max<sub>m</sub> &delta;&gamma;<sub>m</sub> &gt; max(&sigma;<sub>&gamma;</sub>, {gamma_floor} eV/&Aring;<sup>2</sup>)
+                &nbsp;or&nbsp; max<sub>m</sub> &delta;&eta;<sub>m</sub> &gt; max(&sigma;<sub>&eta;</sub>, {eta_floor} V)
+              </div>
+              <p class="text-xs text-slate-600">
+                &epsilon;<sub>bulk,m</sub>: model m's energy per atom of the bulk the slab was cut from;
+                A: slab area; s: species of the candidate (clean slab *, intermediates, gas references per
+                molecule); &part;&Delta;G<sub>i</sub>/&part;E<sub>s</sub>: coefficient of E<sub>s</sub> in step i;
+                forces of fixed atoms are excluded; stress is not used (slab cells are never relaxed);
+                k = {k} eV/&Aring;<sup>2</sup>.
+              </p>
+              <p>
+                <strong>Labels.</strong> Surfaces: <em>robust</em> = same facet rank under every model,
+                <em>uncertain</em> = rank differs. Candidates: <em>robust</em> = &sigma;<sub>&eta;</sub> &le; {eta_tol} V and
+                the same potential-determining step, <em>uncertain</em> otherwise. <em>geometry (slab / bulk /
+                adsorbate / gas)</em> overrides both and names what dominates the shift. Per surface and candidate
+                details are in the per-bulk tables below (&plusmn; = std over all models; hover for each model's
+                value); the reaction-path diagrams overlay each committee model as thin lines.
+              </p>
+              <p class="text-xs text-slate-500">
+                The spread measures disagreement between MLIPs; it is not an error bar calibrated against DFT.
+              </p>
+            </div>
+            <div class="overflow-x-auto border rounded-lg">
+              <table class="w-full text-sm text-left text-slate-700">
+                <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
+                  <tr>
+                    <th class="px-4 py-3">Bulk</th>
+                    <th class="px-4 py-3" title="All MLIPs pick the same lowest-gamma facet">Lowest facet agrees</th>
+                    <th class="px-4 py-3" title="All MLIPs pick the same facets for adsorption">Adsorption facets agree</th>
+                    <th class="px-4 py-3"><span class="normal-case">&sigma;<sub>&gamma;</sub></span> range (eV/&Aring;&sup2;)</th>
+                    <th class="px-4 py-3">Best &eta; <span class="normal-case">({esc(order)})</span></th>
+                    <th class="px-4 py-3"><span class="normal-case">&sigma;<sub>&eta;</sub></span> (V)</th>
+                    <th class="px-4 py-3" title="The primary's best candidate is also best for every MLIP">Best stays best</th>
+                    <th class="px-4 py-3">Label</th>
+                  </tr>
+                </thead>
+                <tbody>{"".join(rows)}</tbody>
+              </table>
+            </div>
+          </div>
+        </section>"""
+
+
 def _keep_unit_case(html_doc):
     """Table headers and the small metadata labels are styled ``uppercase``,
     which would print "eV" as "EV", "eta" as a capital Eta and
@@ -1529,10 +1838,12 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
         mp_id_bit = f' &nbsp;|&nbsp; MP ID: {mp_id_cell(b)}' if (b and mp_id_cell(b) != "&mdash;") else ""
 
         surface_rows = []
+        surf_meta = s.get("surface_uncertainty_meta")
+        surf_unc_present = bool(surf_meta) and any(surf.get("uncertainty") for surf in s["surfaces"])
         for surf in s["surfaces"]:
             miller = str(tuple(surf["miller_index"])) if surf["miller_index"] else "?"
             best = surf["best_candidate"]
-            eta_cell = f'{best["eta"]:.3f} V' if best else "&mdash;"
+            eta_cell = _eta_cell(best, esc)
             # surf["n_atoms"]/["area"] are the base (1x1) slab DBSurface
             # stored; the best candidate on this surface may have been
             # computed on a repeated supercell (different candidates on the
@@ -1542,7 +1853,23 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
             mult = _repeat_multiplier(best.get("repeat")) if best else 1
             n_atoms_cell = surf["n_atoms"] * mult if surf["n_atoms"] is not None else "&mdash;"
             area_cell = f'{surf["area"] * mult:.2f}' if surf["area"] is not None else "&mdash;"
-            fe_cell = f'{surf["formation_energy"]:.4f}' if surf["formation_energy"] is not None else "&mdash;"
+            fe_cell = _gamma_cell(surf, surf_meta, esc)
+            if surf_unc_present:
+                unc = surf.get("uncertainty")
+                if unc:
+                    methods = _committee_methods(unc, surf_meta)
+                    rank_cell = (f'<span title="{esc(" / ".join(methods))}">'
+                                 + " / ".join(str(unc["rank"].get(m, "?")) for m in methods) + "</span>")
+                    via = (f'<br><span class="text-xs text-slate-500">via '
+                           f'{esc(_committee_via_text(unc, "surface"))}</span>'
+                           if unc.get("geometry_disagreement") else "")
+                    label_cell = _committee_badge(unc, esc, "surface") + via
+                else:
+                    rank_cell = label_cell = "&mdash;"
+                unc_cells = (f'<td class="px-4 py-3">{rank_cell}</td>'
+                             f'<td class="px-4 py-3">{label_cell}</td>')
+            else:
+                unc_cells = ""
             repeat = best.get("repeat") if best else None
             repeat_cell = f"({repeat[0]}, {repeat[1]})" if repeat and len(repeat) >= 2 else "&mdash;"
             surface_rows.append(f"""
@@ -1550,6 +1877,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                         <td class="px-4 py-3 font-mono text-xs">{surf["surface_id"]}</td>
                         <td class="px-4 py-3">{esc(miller)}</td>
                         <td class="px-4 py-3">{fe_cell}</td>
+                        {unc_cells}
                         <td class="px-4 py-3">{n_atoms_cell}</td>
                         <td class="px-4 py-3">{area_cell}</td>
                         <td class="px-4 py-3">{eta_cell}</td>
@@ -1558,6 +1886,14 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
         surface_rows_html = "".join(surface_rows) or (
             '<tr><td colspan="7" class="px-4 py-4 text-slate-400 italic">'
             'no stable surfaces found</td></tr>')
+
+        if surf_unc_present:
+            order = " / ".join([surf_meta["primary"]] + [m["model"] for m in surf_meta.get("committee", [])])
+            unc_head = (f'<th class="px-4 py-3" title="Rank of the facet within this bulk ({esc(order)})">'
+                        '&gamma; rank</th><th class="px-4 py-3">&gamma; label</th>')
+        else:
+            unc_head = ""
+        committee_note = _committee_note(s, esc)
 
         if any(surf["best_candidate"] for surf in s["surfaces"]):
             fed_block = (f'<img src="{_fig_to_data_uri(plot_bulk_detail(s, reaction, reaction_path))}" '
@@ -1584,6 +1920,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                   <th class="px-4 py-3">Surface ID</th>
                   <th class="px-4 py-3">Miller Index</th>
                   <th class="px-4 py-3">Surface Energy (eV/&Aring;&sup2;)</th>
+                  {unc_head}
                   <th class="px-4 py-3" title="Scaled to the best candidate's supercell repeat, not the bare relaxed slab">
                     # Atoms</th>
                   <th class="px-4 py-3" title="Scaled to the best candidate's supercell repeat, not the bare relaxed slab">
@@ -1596,6 +1933,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
               <tbody>{surface_rows_html}</tbody>
             </table>
           </div>
+          {committee_note}
 
           <h4 class="font-bold text-slate-900 mb-2 text-sm">Reaction Path Diagrams</h4>
           {fed_block}
@@ -1698,6 +2036,18 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
 
     synth_section, synth_models = _synthesizability_section(summaries, esc)
     uncertainty_section = _uncertainty_section(summaries, esc)
+    surface_adsorption_section = _surface_adsorption_section(summaries, esc)
+    analysed_candidates = [c["uncertainty"] for s in summaries
+                           for c in s["reaction_candidates"] if c.get("uncertainty")]
+    if analysed_candidates:
+        n_robust_cand = sum(1 for u in analysed_candidates if u.get("label") == "robust")
+        robust_candidates_tile = f"""
+              <div class="p-3 rounded-xl bg-slate-50 border border-slate-100" title="Reaction candidates with the same potential-determining step and std(eta) within tolerance under every committee MLIP">
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Robust candidates</p>
+                <p class="text-lg font-bold text-slate-900">{n_robust_cand} / {len(analysed_candidates)}</p>
+              </div>"""
+    else:
+        robust_candidates_tile = ""
     if unc_present:
         robust_tile = f"""
               <div class="p-3 rounded-xl bg-slate-50 border border-slate-100" title="Bulks stable under every committee MLIP">
@@ -1706,7 +2056,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
               </div>"""
     else:
         robust_tile = ""
-    summary_cols = "md:grid-cols-6" if unc_present else "md:grid-cols-5"
+    summary_cols = f"md:grid-cols-{5 + bool(unc_present) + bool(analysed_candidates)}"
 
     html_doc = f"""<!doctype html>
 <html lang="en">
@@ -1763,7 +2113,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
               <div class="p-3 rounded-xl bg-slate-50 border border-slate-100" title="Bulks whose ML band gap straddles this reaction's redox couple with margin">
                 <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Light-viable</p>
                 <p class="text-lg font-bold text-slate-900">{n_light_cell}</p>
-              </div>{robust_tile}
+              </div>{robust_tile}{robust_candidates_tile}
             </div>
           </div>
         </section>
@@ -1793,6 +2143,8 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
         </section>
 
         {uncertainty_section}
+
+        {surface_adsorption_section}
 
         {light_section}
 

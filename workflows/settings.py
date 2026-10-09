@@ -115,6 +115,26 @@ SOFT_STOP_BEFORE_SURFACE = bool(inputs.get('soft_stop', {}).get('before_surface_
 # gain by relaxing (forces + deviatoric stress; see
 # workchains/ehull_uncertainty.py) could shift its E_hull by more than
 # max(spread, relax_energy_floor).
+#
+# Surface-energy and adsorption / overpotential uncertainty (advisory
+# SurfaceUncertaintyWorkChain after SurfaceBuilderWorkChain and
+# AdsorptionUncertaintyWorkChain after AdsorbatesWorkChain): the same
+# single-point committee idea, on the slabs / adsorbate systems relaxed by
+# face_build.model / adsorbates.model. Results go to the attributes of the
+# DBSurface / DBSurfaceMLAdsorbate rows. Enabled independently of the bulk
+# block above; force_constant is shared.
+#
+#   uncertainty:
+#     surface:
+#       enabled: true
+#       committee:                 # used for surface energies AND adsorption
+#         - {model: UMA,  head: oc22}
+#         - {model: MACE, head: oc20_usemppbe}
+#       gamma_floor: 0.002         # eV/A^2: geometry shifts below this never flag
+#     adsorption:
+#       enabled: true              # uses surface.committee
+#       eta_tolerance: 0.10        # V: std(eta) above this -> "uncertain"
+#       eta_floor: 0.05            # V: geometry shifts below this never flag
 _uncertainty = inputs.get('uncertainty', {}) or {}
 UNCERTAINTY_ENABLED = bool(_uncertainty.get('enabled', False))
 UNCERTAINTY_COMMITTEE = [
@@ -129,30 +149,57 @@ UNCERTAINTY_RELAX_ENERGY_FLOOR = float(_uncertainty.get('relax_energy_floor', 0.
 UNCERTAINTY_CHUNK_SIZE = int(_uncertainty.get('chunk_size', 500))
 
 
-def _check_uncertainty_committee():
-    """Fail early on an invalid committee: committee rows are stored with
-    method = model name, so a model equal to the primary bulk model (or listed
-    twice) would collide with / overwrite another model's DBStructureVersion
-    rows. Model names map case-insensitively onto the same AiiDA plugin, so
-    they are compared case-insensitively."""
-    if not UNCERTAINTY_ENABLED:
-        return
-    primary = str(inputs['bulk_relax']['model'])
-    names = [m["model"] for m in UNCERTAINTY_COMMITTEE]
+def _committee(block):
+    return [
+        {"model": str(m["model"]), "head": m.get("head")} if isinstance(m, dict)
+        else {"model": str(m), "head": None}
+        for m in (block.get('committee') or [])
+    ]
+
+
+_surface_uncertainty = _uncertainty.get('surface', {}) or {}
+_adsorption_uncertainty = _uncertainty.get('adsorption', {}) or {}
+SURFACE_UNCERTAINTY_ENABLED = bool(_surface_uncertainty.get('enabled', False))
+SURFACE_UNCERTAINTY_COMMITTEE = _committee(_surface_uncertainty)
+SURFACE_UNCERTAINTY_GAMMA_FLOOR = float(_surface_uncertainty.get('gamma_floor', 0.002))
+ADSORPTION_UNCERTAINTY_ENABLED = bool(_adsorption_uncertainty.get('enabled', False))
+ADSORPTION_UNCERTAINTY_ETA_TOLERANCE = float(_adsorption_uncertainty.get('eta_tolerance', 0.10))
+ADSORPTION_UNCERTAINTY_ETA_FLOOR = float(_adsorption_uncertainty.get('eta_floor', 0.05))
+
+
+def _check_committee(label, committee, primaries):
+    """Fail early on an invalid committee: a committee model equal to a
+    primary model of that stage, or listed twice, would collide with that
+    model's stored results (bulk: DBStructureVersion rows with method = model
+    name; surfaces / adsorption: per-model entries in the row attributes).
+    Model names map case-insensitively onto the same AiiDA plugin, so they are
+    compared case-insensitively."""
+    names = [m["model"] for m in committee]
     if not names:
-        raise ValueError("uncertainty.enabled is true but uncertainty.committee is empty.")
+        raise ValueError(f"{label} is enabled but its committee is empty.")
     lowered = [n.lower() for n in names]
-    if primary.lower() in lowered:
-        raise ValueError(f"uncertainty.committee must not contain the primary bulk model "
-                         f"bulk_relax.model='{primary}'.")
+    for key, primary in primaries.items():
+        if str(primary).lower() in lowered:
+            raise ValueError(f"{label} committee must not contain the primary model "
+                             f"{key}='{primary}'.")
     duplicates = sorted({n for n in names if lowered.count(n.lower()) > 1})
     if duplicates:
-        raise ValueError(f"uncertainty.committee lists model(s) more than once: {duplicates}.")
+        raise ValueError(f"{label} committee lists model(s) more than once: {duplicates}.")
     missing = [n for n in names
                if n not in configs.get('codes', {}) or n not in configs.get('models', {})]
     if missing:
-        raise ValueError(f"uncertainty.committee model(s) {missing} have no 'codes' / "
+        raise ValueError(f"{label} committee model(s) {missing} have no 'codes' / "
                          "'models' entry in config.yaml.")
+
+
+def _check_uncertainty_committee():
+    if UNCERTAINTY_ENABLED:
+        _check_committee("uncertainty", UNCERTAINTY_COMMITTEE,
+                         {"bulk_relax.model": inputs['bulk_relax']['model']})
+    if SURFACE_UNCERTAINTY_ENABLED or ADSORPTION_UNCERTAINTY_ENABLED:
+        _check_committee("uncertainty.surface", SURFACE_UNCERTAINTY_COMMITTEE,
+                         {"face_build.model": inputs['face_build']['model'],
+                          "adsorbates.model": inputs['adsorbates']['model']})
 
 
 _check_uncertainty_committee()
