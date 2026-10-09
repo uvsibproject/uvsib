@@ -11,6 +11,7 @@ from uvsib.db.utils import (
         delete_row,
         query_by_columns,
         get_chemical_systems,
+        not_singlepoint,
         query_structure)
 from uvsib.workchains.utils import (
         unique_low_energy_comp,
@@ -42,6 +43,7 @@ def get_entries_from_db(chemical_formula, method):
                 session.query(DBStructureVersion)
                 .filter(DBStructureVersion.chemsys.in_(chemical_systems))
                 .filter(DBStructureVersion.method == method)
+                .filter(not_singlepoint())
                 .all()
             )
         except:
@@ -50,8 +52,6 @@ def get_entries_from_db(chemical_formula, method):
     for row in results:
         if row.source == "MPDB_ref":
             continue
-#        if not Composition(row.composition).is_element and row.composition != chemical_formula:
-#            continue
         struct = Structure.from_dict(row.structure)
         entries.append(
                 ComputedStructureEntry(
@@ -89,6 +89,10 @@ class PhaseDiagramMLWorkChain(WorkChain):
             cls.wait_for_data,
             cls.check_pythonjob,
             cls.store_stable_structs,
+            if_(cls.should_run_uncertainty)(
+                cls.uncertainty,
+                cls.inspect_uncertainty
+            ),
             if_(cls.should_run_optical_screen)(
                 cls.optical_screen,
                 cls.inspect_optical_screen
@@ -104,6 +108,8 @@ class PhaseDiagramMLWorkChain(WorkChain):
         spec.exit_code(301, "ERROR_NO_STRUCTURES_FOUND", message="No stable structures were found")
         spec.exit_code(302, "ERROR_NO_CHEMSYS_FOUND", message="Chemical system does not exist in DBChemsys")
         spec.exit_code(303, "ERROR_NO_COMPOSITION_FOUND", message="Chemical formula does not exist in DBComposition")
+        spec.exit_code(304, "ERROR_OPTICAL_SCREEN_FAILED", message="OpticalScreenWorkChain did not finish successfully")
+        spec.exit_code(305, "ERROR_SYNTHESIZABILITY_FAILED", message="SynthesizabilityScreenWorkChain did not finish successfully")
 
     def setup(self):
         """Setup and report"""
@@ -312,9 +318,38 @@ class PhaseDiagramMLWorkChain(WorkChain):
         update_row(DBComposition, row.uuid, {"stable_struct": stable_struct})
         self.report(f"{len(unique_entries)} stable structures for {chemical_formula} were stored.")
 
+    def should_run_uncertainty(self):
+        """Run the committee E_above_hull uncertainty (EhullUncertaintyWorkChain)
+        on the ML bulk selection. Opt-in (``settings.UNCERTAINTY_ENABLED``);
+        skipped if there is nothing selected."""
+        if not settings.UNCERTAINTY_ENABLED:
+            return False
+        rows = query_by_columns(DBComposition, {"composition": self.ctx.chemical_formula})
+        if not rows or not (rows[0].stable_struct or {}).get("ml_selection"):
+            self.report("E_hull uncertainty: no ML bulk selection; skipping.")
+            return False
+        return True
+
+    def uncertainty(self):
+        """Submit EhullUncertaintyWorkChain for the ML bulk selection."""
+        builder = self._construct_uncertainty_builder()
+        future = self.submit(builder)
+        self.to_context(**{"uncertainty": future})
+
+    def inspect_uncertainty(self):
+        """Advisory stage: never fail the phase diagram on the uncertainty analysis."""
+        if "uncertainty" not in self.ctx:
+            return
+        wch = self.ctx.uncertainty
+        if not wch.is_finished_ok:
+            self.report(f"EhullUncertaintyWorkChain did not finish OK (exit {wch.exit_status}); "
+                        "continuing without E_hull uncertainty.")
+            return
+        self.report("EhullUncertaintyWorkChain finished; ml_uncertainty written for the ML bulk selection.")
+
     def should_run_optical_screen(self):
         """Run the no-DFT light-harvesting screen (OpticalScreenWorkChain) on
-        the ML bulk selection. Opt-in (``settings.OPTICAL_SCREEN_ENABLED``);
+        the ML bulk selection. On by default (``settings.OPTICAL_SCREEN_ENABLED``);
         skipped if there is nothing selected to screen."""
         if not settings.OPTICAL_SCREEN_ENABLED:
             return False
@@ -328,26 +363,23 @@ class PhaseDiagramMLWorkChain(WorkChain):
         """Submit OpticalScreenWorkChain for the ML bulk selection."""
         try:
             builder = self._construct_optical_screen_builder()
+            future = self.submit(builder)
         except Exception as exc:  # e.g. the `Electronic` code is not configured
-            self.report(f"Optical screen: cannot build builder ({exc}); skipping.")
-            return
-        future = self.submit(builder)
+            self.report(f"Optical screen: cannot submit OpticalScreenWorkChain ({exc}).")
+            return self.exit_codes.ERROR_OPTICAL_SCREEN_FAILED
         self.to_context(**{"optical_screen": future})
 
     def inspect_optical_screen(self):
-        """Advisory stage: never fail the phase diagram on the light screen."""
-        if "optical_screen" not in self.ctx:
-            return
+        """Mandatory stage: fail the phase diagram if the light screen fails."""
         wch = self.ctx.optical_screen
         if not wch.is_finished_ok:
-            self.report(f"OpticalScreenWorkChain did not finish OK (exit {wch.exit_status}); "
-                        "continuing without band-edge screening.")
-            return
+            self.report(f"OpticalScreenWorkChain did not finish OK (exit {wch.exit_status}).")
+            return self.exit_codes.ERROR_OPTICAL_SCREEN_FAILED
         self.report("OpticalScreenWorkChain finished; band_info written for the ML bulk selection.")
 
     def should_run_synthesizability(self):
         """Run the CSLLM synthesizability screen (SynthesizabilityScreenWorkChain)
-        on the ML bulk selection. Opt-in (``settings.SYNTHESIZABILITY_ENABLED``);
+        on the ML bulk selection. On by default (``settings.SYNTHESIZABILITY_ENABLED``);
         skipped if there is nothing selected to screen."""
         if not settings.SYNTHESIZABILITY_ENABLED:
             return False
@@ -361,21 +393,18 @@ class PhaseDiagramMLWorkChain(WorkChain):
         """Submit SynthesizabilityScreenWorkChain for the ML bulk selection."""
         try:
             builder = self._construct_synthesizability_builder()
+            future = self.submit(builder)
         except Exception as exc:  # e.g. the `CSLLM` code is not configured
-            self.report(f"Synthesizability screen: cannot build builder ({exc}); skipping.")
-            return
-        future = self.submit(builder)
+            self.report(f"Synthesizability screen: cannot submit SynthesizabilityScreenWorkChain ({exc}).")
+            return self.exit_codes.ERROR_SYNTHESIZABILITY_FAILED
         self.to_context(**{"synthesizability": future})
 
     def inspect_synthesizability(self):
-        """Advisory stage: never fail the phase diagram on the synthesizability screen."""
-        if "synthesizability" not in self.ctx:
-            return
+        """Mandatory stage: fail the phase diagram if the synthesizability screen fails."""
         wch = self.ctx.synthesizability
         if not wch.is_finished_ok:
-            self.report(f"SynthesizabilityScreenWorkChain did not finish OK (exit {wch.exit_status}); "
-                        "continuing without synthesizability predictions.")
-            return
+            self.report(f"SynthesizabilityScreenWorkChain did not finish OK (exit {wch.exit_status}).")
+            return self.exit_codes.ERROR_SYNTHESIZABILITY_FAILED
         self.report("SynthesizabilityScreenWorkChain finished; predictions written for the ML bulk selection.")
 
     def final_report(self):
@@ -405,6 +434,14 @@ class PhaseDiagramMLWorkChain(WorkChain):
         builder = Workflow.get_builder()
         builder.chemical_formula = Str(self.ctx.chemical_formula)
         builder.chemical_systems = List(self.ctx.chemical_systems)
+        builder.ml_bulk_model = Str(self.ctx.ml_bulk_model)
+        return builder
+
+    def _construct_uncertainty_builder(self):
+        """EhullUncertaintyWorkChain builder (committee single-point E_hull spread)."""
+        Workflow = WorkflowFactory("ehulluncertainty")
+        builder = Workflow.get_builder()
+        builder.chemical_formula = Str(self.ctx.chemical_formula)
         builder.ml_bulk_model = Str(self.ctx.ml_bulk_model)
         return builder
 

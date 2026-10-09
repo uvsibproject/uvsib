@@ -1,10 +1,29 @@
 import re
 from itertools import combinations
-from sqlalchemy import inspect, delete, text
+from sqlalchemy import inspect, delete, text, func, not_
 from pymatgen.core import Composition, Structure
 from uvsib.db.session import get_session
 from uvsib.db.tables import (DBChemsys, DBStructure, DBStructureVersion, DBSurface,
                              DBSurfaceMLAdsorbate, DBAkmcEvent, DBSynthesizability)
+
+
+# EhullUncertaintyWorkChain stores committee single points (energy of a committee
+# MLIP on the PRIMARY model's relaxed geometry) as DBStructureVersion rows with
+# method = <committee model> and attributes["calc"] == SINGLEPOINT_CALC. They are
+# not relaxed results of that model, so the regular pipeline must never read
+# them: query_structure / get_entries_from_db exclude them via not_singlepoint().
+SINGLEPOINT_CALC = "singlepoint"
+
+
+def not_singlepoint():
+    """SQL filter that drops committee single-point versions (rows with NULL
+    attributes are kept)."""
+    return not_(func.coalesce(
+        DBStructureVersion.attributes.contains({"calc": SINGLEPOINT_CALC}), False))
+
+
+def _is_singlepoint_attributes(attributes):
+    return (attributes or {}).get("calc") == SINGLEPOINT_CALC
 
 
 def add_surface_ml_adsorbate(existing_uuid, surf_id, surface_miller_index, comp, react, react_path, site_type, ads_coord, repeat, e, dG_steps, dG_cumulative, ad_set):
@@ -150,6 +169,12 @@ def add_version_to_existing_structure(
         - "error": raise an exception (default)
         - "ignore": do nothing and return the existing version
         - "override": update the existing version with new attributes
+
+    A committee single point (``attributes["calc"] == SINGLEPOINT_CALC``) of the
+    same method is not a conflict for a new non-single-point version: unless
+    ``on_conflict == "override"`` (an explicit field update), the single point is
+    deleted and the new version stored in its place -- e.g. when a former
+    committee model is later used as the primary model and relaxes the structure.
     """
     with get_session() as session:
         existing_version = (
@@ -157,6 +182,13 @@ def add_version_to_existing_structure(
             .filter_by(structure_uuid=existing_uuid, method=method)
             .first()
         )
+
+        if (existing_version and on_conflict != "override"
+                and _is_singlepoint_attributes(existing_version.attributes)
+                and not _is_singlepoint_attributes(add_attributes.get("attributes"))):
+            session.delete(existing_version)
+            session.flush()
+            existing_version = None
 
         if existing_version:
             if on_conflict == "error":
@@ -241,15 +273,18 @@ def delete_structure(structure_filters: dict, **version_filters):
 
         session.commit()
 
-def query_structure(structure_filters, **version_filters):
+def query_structure(structure_filters, *, include_singlepoints=False, **version_filters):
     """
     Query DBStructureVersion joined with DBStructure
     
     structure_filters: Dict of column names and values for DBStructure (e.g., {'uuid': '...'})
+    include_singlepoints: also return committee single-point versions (excluded by default)
     version_filters: Keyword arguments for DBStructureVersion filters
     """
     with get_session() as session:
         query = session.query(DBStructureVersion).join(DBStructure)
+        if not include_singlepoints:
+            query = query.filter(not_singlepoint())
 
         # Apply filters on DBStructure
         for attr, value in structure_filters.items():

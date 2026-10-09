@@ -65,22 +65,24 @@ AKMC_ENABLED = bool(inputs.get('akmc', {}).get('enabled', False))
 
 # No-DFT electronic / light-harvesting screen (ML band gap + Butler-Ginley band
 # edges + photocatalytic straddle test) as a PhaseDiagramMLWorkChain branch,
-# right after the ML bulk selection. Opt-in via input.yaml (`optical_screen:
-# {enabled: true}`) because it needs a dedicated `Electronic` code (see
+# right after the ML bulk selection. On by default; disable via input.yaml
+# (`optical_screen: {enabled: false}`). Needs a dedicated `Electronic` code (see
 # config.yaml) whose environment provides the pretrained gap models (matgl,
-# optionally alignn). Default OFF, so runs without the block are unaffected.
+# optionally alignn). Mandatory when enabled: a failure (including a missing
+# `Electronic` code) fails PhaseDiagramMLWorkChain (exit 304).
 # `optical_screen.gate_surface_builder: true` additionally restricts the bulks
 # handed to SurfaceBuilderWorkChain to those predicted to absorb visible light
-# (reaction-agnostic gap window); default off.
-OPTICAL_SCREEN_ENABLED = bool(inputs.get('optical_screen', {}).get('enabled', False))
+# (reaction-agnostic gap window).
+OPTICAL_SCREEN_ENABLED = bool(inputs.get('optical_screen', {}).get('enabled', True))
 
 # CSLLM synthesizability / synthesis-method / precursor prediction
 # (SynthesizabilityScreenWorkChain) as a PhaseDiagramMLWorkChain branch, run
 # after the optical screen on the bulks that passed the E_above_hull screen.
-# Advisory only -- it never filters structures. Opt-in via input.yaml
-# (`synthesizability: {enabled: true}`) because it needs a dedicated GPU
-# `CSLLM` code and the CSLLM weights (see config.yaml and
-# docs/synthesizability_workchain.md). Default OFF.
+# It never filters structures. On by default; disable via input.yaml
+# (`synthesizability: {enabled: false}`). Needs a dedicated GPU `CSLLM` code
+# and the CSLLM weights (see config.yaml and docs/synthesizability_workchain.md).
+# Mandatory when enabled: a failure (including a missing `CSLLM` code) fails
+# PhaseDiagramMLWorkChain (exit 305).
 SYNTHESIZABILITY_ENABLED = bool(inputs.get('synthesizability', {}).get('enabled', True))
 
 # Soft stop: gracefully end the MainWorkChain after the generation/phase-diagram
@@ -88,6 +90,72 @@ SYNTHESIZABILITY_ENABLED = bool(inputs.get('synthesizability', {}).get('enabled'
 # Opt-in via input.yaml (`soft_stop: {before_surface_builder: true}`); absent or
 # false -> the full pipeline runs as before.
 SOFT_STOP_BEFORE_SURFACE = bool(inputs.get('soft_stop', {}).get('before_surface_builder', False))
+
+# E_above_hull uncertainty of the primary bulk MLIP (bulk_relax.model)
+# (EhullUncertaintyWorkChain) as an advisory PhaseDiagramMLWorkChain branch,
+# run right after the ML bulk selection. A committee of other MLIPs re-scores
+# the primary-relaxed structures by single-point energies (no relaxation), one
+# job per model on that model's own code; the spread of the per-model E_hull is
+# stored in DBComposition.stable_struct["ml_uncertainty"]. Opt-in via
+# input.yaml; default OFF. Committee energies are stored as DBStructureVersion
+# rows with method = <committee model name>.
+#
+#   uncertainty:
+#     enabled: true
+#     committee:
+#       - {model: UMA,       head: omat}
+#       - {model: MatterSim, head: null}
+#     ehull_window: 0.2          # eV/atom: competing phases re-evaluated (primary hull)
+#     force_constant: 10.0       # eV/A^2: k of the harmonic relaxation-energy estimate
+#     shear_modulus: 50.0        # GPa: G of the harmonic relaxation-energy estimate
+#     relax_energy_floor: 0.003  # eV/atom: geometry shifts below this never flag
+#     chunk_size: 500            # structures per single-point job
+#
+# "geometry disagreement" flag: the estimated energy a committee model would
+# gain by relaxing (forces + deviatoric stress; see
+# workchains/ehull_uncertainty.py) could shift its E_hull by more than
+# max(spread, relax_energy_floor).
+_uncertainty = inputs.get('uncertainty', {}) or {}
+UNCERTAINTY_ENABLED = bool(_uncertainty.get('enabled', False))
+UNCERTAINTY_COMMITTEE = [
+    {"model": str(m["model"]), "head": m.get("head")} if isinstance(m, dict)
+    else {"model": str(m), "head": None}
+    for m in (_uncertainty.get('committee') or [])
+]
+UNCERTAINTY_EHULL_WINDOW = float(_uncertainty.get('ehull_window', 0.2))
+UNCERTAINTY_FORCE_CONSTANT = float(_uncertainty.get('force_constant', 10.0))
+UNCERTAINTY_SHEAR_MODULUS = float(_uncertainty.get('shear_modulus', 50.0))
+UNCERTAINTY_RELAX_ENERGY_FLOOR = float(_uncertainty.get('relax_energy_floor', 0.003))
+UNCERTAINTY_CHUNK_SIZE = int(_uncertainty.get('chunk_size', 500))
+
+
+def _check_uncertainty_committee():
+    """Fail early on an invalid committee: committee rows are stored with
+    method = model name, so a model equal to the primary bulk model (or listed
+    twice) would collide with / overwrite another model's DBStructureVersion
+    rows. Model names map case-insensitively onto the same AiiDA plugin, so
+    they are compared case-insensitively."""
+    if not UNCERTAINTY_ENABLED:
+        return
+    primary = str(inputs['bulk_relax']['model'])
+    names = [m["model"] for m in UNCERTAINTY_COMMITTEE]
+    if not names:
+        raise ValueError("uncertainty.enabled is true but uncertainty.committee is empty.")
+    lowered = [n.lower() for n in names]
+    if primary.lower() in lowered:
+        raise ValueError(f"uncertainty.committee must not contain the primary bulk model "
+                         f"bulk_relax.model='{primary}'.")
+    duplicates = sorted({n for n in names if lowered.count(n.lower()) > 1})
+    if duplicates:
+        raise ValueError(f"uncertainty.committee lists model(s) more than once: {duplicates}.")
+    missing = [n for n in names
+               if n not in configs.get('codes', {}) or n not in configs.get('models', {})]
+    if missing:
+        raise ValueError(f"uncertainty.committee model(s) {missing} have no 'codes' / "
+                         "'models' entry in config.yaml.")
+
+
+_check_uncertainty_committee()
 
 _PD_VERIFICATION = False
 _SKIP_CSP = False

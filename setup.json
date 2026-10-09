@@ -61,6 +61,7 @@
 		"minimahopping = uvsib.codes.minimahopping.workchain:MinimaHoppingWorkChain",
 		"mpdbml = uvsib.workchains.mpdb_ml:MPDBMLWorkChain",
 		"phasediagram = uvsib.workchains.phase_diagram:PhaseDiagramMLWorkChain",
+		"ehulluncertainty = uvsib.workchains.uncertainty:EhullUncertaintyWorkChain",
 		"bandalignment = uvsib.workchains.band_alignment:BandAlignmentWorkChain",
 		"csp = uvsib.workchains.csp:CSPWorkChain",
 		"gen = uvsib.workchains.gen:GeneratorWorkChain",

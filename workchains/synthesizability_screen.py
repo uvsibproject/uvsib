@@ -11,8 +11,8 @@ selection -- the structures that passed the E_above_hull screen in
 2. turns the raw probabilities into a label with the configured thresholds;
 3. writes one ``DBSynthesizability`` row per bulk.
 
-It is purely advisory: nothing downstream reads it to drop a structure, and
-a failure never fails the phase diagram. ``pipeline_report.py`` renders it as
+Nothing downstream reads it to drop a structure, but the stage is mandatory
+when enabled: a failure fails the phase diagram (exit 305). ``pipeline_report.py`` renders it as
 the "Synthesizability" block.
 
 Config (``input.yaml`` ``synthesizability:`` block, all optional except

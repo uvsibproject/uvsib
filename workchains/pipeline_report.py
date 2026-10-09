@@ -132,10 +132,21 @@ def bulk_candidates(chemical_formula):
     threshold = stable_struct.get("ml_ehull_threshold")
     model = stable_struct.get("ml_bulk_model")
 
+    # committee E_hull uncertainty (EhullUncertaintyWorkChain); ignored if it
+    # was computed for a different primary model than the current selection
+    uncertainty = stable_struct.get("ml_uncertainty") or {}
+    if uncertainty.get("primary") != model:
+        uncertainty = {}
+    uncertainty_meta = {k: v for k, v in uncertainty.items() if k != "per_uuid"} or None
+    uncertainty_by_uuid = uncertainty.get("per_uuid") or {}
+
     candidates = []
     for entry in stable_struct.get("ml_selection", []):
         provenance = _bulk_source(entry["uuid"], method=model)
+        unc = uncertainty_by_uuid.get(entry["uuid"])
         candidates.append({
+            "uncertainty": unc,
+            "uncertainty_meta": uncertainty_meta if unc else None,
             "structure_uuid": entry["uuid"],
             "ehull": entry["ehull"],
             "selected_above_threshold": entry.get("selected_above_threshold", False),
@@ -543,10 +554,37 @@ def plot_bulk_comparison(summaries, ax_ehull=None, ax_eta=None):
     threshold = next((s["bulk"]["ehull_threshold"] for s in summaries if s["bulk"]), None)
     bar_colors = ["goldenrod" if (s["bulk"] and s["bulk"]["selected_above_threshold"]) else "seagreen"
                   for s in summaries]
-    ax_ehull.bar(tick_labels, ehulls, color=bar_colors)
+    bars = ax_ehull.bar(tick_labels, ehulls, color=bar_colors)
+
+    # committee E_hull uncertainty: one marker per committee MLIP + min-max
+    # whisker; bars flagged for geometry disagreement are hatched
+    meta = next((s["bulk"]["uncertainty_meta"] for s in summaries
+                 if s["bulk"] and s["bulk"].get("uncertainty")), None)
+    if meta:
+        markers = ["o", "s", "^", "D", "v", "P"]
+        for k, model in enumerate(m["model"] for m in meta.get("committee", [])):
+            xs, ys = [], []
+            for i, s in enumerate(summaries):
+                unc = s["bulk"].get("uncertainty") if s["bulk"] else None
+                if unc and model in unc["ehull"]:
+                    xs.append(i)
+                    ys.append(unc["ehull"][model])
+            ax_ehull.scatter(xs, ys, marker=markers[k % len(markers)], color="black",
+                             s=22, zorder=3, label=model)
+        for i, s in enumerate(summaries):
+            unc = s["bulk"].get("uncertainty") if s["bulk"] else None
+            if not unc:
+                continue
+            ax_ehull.vlines(i, unc["ehull_min"], unc["ehull_max"], color="black",
+                            linewidth=1, zorder=2)
+            if unc.get("geometry_disagreement"):
+                bars[i].set_hatch("//")
+                bars[i].set_edgecolor("purple")
+
     if threshold is not None:
         ax_ehull.axhline(threshold, color="black", linestyle="--", linewidth=1,
                           label=f"threshold = {threshold:.2f}")
+    if threshold is not None or meta:
         ax_ehull.legend(fontsize=8)
     ax_ehull.set_ylabel("E above hull (eV/atom)")
     ax_ehull.set_title("Bulk stability")
@@ -1125,6 +1163,230 @@ def _synthesizability_section(summaries, esc):
     return html, ", ".join(models)
 
 
+_STABILITY_BADGES = {
+    "robust": ("bg-green-100 text-green-700", "robust",
+               "E_hull below the threshold for every model"),
+    "uncertain": ("bg-amber-100 text-amber-700", "uncertain",
+                  "the models disagree on whether E_hull is below the threshold"),
+    "unstable": ("bg-red-100 text-red-700", "unstable",
+                 "E_hull above the threshold for every model"),
+    "geometry_disagreement": ("bg-purple-100 text-purple-700", "geometry",
+                              "relaxing on a committee model could shift its E_hull by as much "
+                              "as the model spread -- the spread is not trusted on its own"),
+}
+
+_GEOMETRY_SOURCE_TEXT = {"self": "geometry (self)", "competing": "geometry (competing phase)"}
+
+
+def _geometry_via_text(unc):
+    """``"via 3cc347b8 (GRACE)"`` / ``"self (GRACE)"`` for the structure that
+    dominates the geometry shift; ``""`` if unknown."""
+    via = unc.get("geometry_via")
+    if not via:
+        return ""
+    if unc.get("geometry_source") == "self":
+        return f'self ({via["model"]})'
+    return f'via {via["uuid"][:8]} ({via["model"]})'
+
+
+def _geometry_title(unc):
+    """Tooltip: the shift bound, the limit and every contributing structure."""
+    shift, limit = unc.get("geometry_shift_max"), unc.get("geometry_limit")
+    if shift is None:
+        return ""
+    lines = [f"possible E_hull shift {1000 * shift:.1f} meV/atom "
+             f"(limit {1000 * limit:.1f} = max(spread, floor))"
+             f" under {unc.get('geometry_shift_model')}"]
+    for c in unc.get("geometry_culprits") or []:
+        lines.append(f'{"self" if c.get("self") else "competing"} {c["uuid"][:8]}: '
+                     f'{1000 * c["shift"]:.1f} meV/atom (relax {1000 * c["relax_energy"]:.1f} '
+                     f'x {c["fraction"]:.2f}); F={_fmt(c.get("max_force"), 2)} eV/A, '
+                     f'stress={_fmt(c.get("max_stress"), 2)} GPa, P={_fmt(c.get("pressure"), 2)} GPa')
+    return "\n".join(lines)
+
+
+def _uncertainty_methods(meta):
+    """Primary first, then the committee (JSONB does not keep key order)."""
+    return [meta["primary"]] + [m["model"] for m in meta.get("committee", [])]
+
+
+def _stability_badge(unc, esc):
+    """Colored label for one bulk's committee verdict (``&mdash;`` if none)."""
+    if not unc:
+        return "&mdash;"
+    css, text, title = _STABILITY_BADGES.get(unc.get("label"), ("bg-slate-100 text-slate-600",
+                                                               unc.get("label"), ""))
+    if unc.get("label") == "geometry_disagreement":
+        text = _GEOMETRY_SOURCE_TEXT.get(unc.get("geometry_source"), text)
+        detail = _geometry_title(unc)
+        if detail:
+            title += "\n" + detail
+    return (f'<span class="px-2 py-0.5 rounded {css} text-xs font-bold" '
+            f'title="{esc(title)}">{esc(text)}</span>')
+
+
+def _fmt(value, digits):
+    return "&mdash;" if value is None else f"{value:.{digits}f}"
+
+
+def _ehull_with_spread(bulk, esc):
+    """E_hull table cell: primary value, &plusmn; std of the signed hull distance
+    energy over all models when the committee analysis exists; per-model values
+    in the tooltip."""
+    unc, meta = bulk.get("uncertainty"), bulk.get("uncertainty_meta")
+    if not unc or not meta:
+        return f'{bulk["ehull"]:.4f}'
+    per_model = " · ".join(f'{m} {unc["ehull"][m]:.3f}' for m in _uncertainty_methods(meta)
+                           if m in unc["ehull"])
+    title = (f"{per_model} (eV/atom). ± = std of the signed hull distance over "
+             f"{unc['n_models']} MLIPs; range {unc['ehull_min']:.3f}–{unc['ehull_max']:.3f}")
+    return (f'<span title="{esc(title)}">{bulk["ehull"]:.4f} &plusmn; '
+            f'{unc["ed_std"]:.3f}</span>')
+
+
+def _uncertainty_section(summaries, esc):
+    """"Stability Uncertainty" section from the committee E_hull analysis
+    (``bulk["uncertainty"]``). ``""`` when no bulk carries one."""
+    with_unc = [s for s in summaries if s["bulk"] and s["bulk"].get("uncertainty")]
+    if not with_unc:
+        return ""
+    meta = with_unc[0]["bulk"]["uncertainty_meta"]
+    methods = _uncertainty_methods(meta)
+    primary = meta["primary"]
+    floor = meta.get("relax_energy_floor")
+
+    head_cells = "".join(
+        f'<th class="px-4 py-3"><span class="normal-case">{esc(m)}{"*" if m == primary else ""}</span></th>'
+        for m in methods)
+    rows = []
+    for s in with_unc:
+        unc = s["bulk"]["uncertainty"]
+        model_cells = []
+        for m in methods:
+            ehull = unc["ehull"].get(m)
+            ed = unc["ed"].get(m)
+            if ehull is None:
+                model_cells.append('<td class="px-4 py-3">&mdash;</td>')
+                continue
+            ed_bit = f' <span class="text-slate-400">({ed:.3f})</span>' if ed is not None and ed < 0 else ""
+            model_cells.append(f'<td class="px-4 py-3">{ehull:.3f}{ed_bit}</td>')
+        shift = unc.get("geometry_shift_max")
+        geo_css = ' bg-purple-50 text-purple-700 font-semibold' if unc.get("geometry_disagreement") else ""
+        if shift is None:
+            geo_cell = "&mdash;"
+        else:
+            via = _geometry_via_text(unc)
+            via_bit = (f'<br><span class="text-xs font-normal text-slate-500">{esc(via)}</span>'
+                       if via and unc.get("geometry_disagreement") else "")
+            geo_cell = (f'<span title="{esc(_geometry_title(unc))}">{1000 * shift:.1f} / '
+                        f'{1000 * unc["geometry_limit"]:.1f}</span>{via_bit}')
+        rows.append(f"""
+                  <tr class="border-t">
+                    <td class="px-4 py-3 font-mono text-xs" title="{esc(s['structure_uuid'])}">{esc(s['structure_uuid'][:8])}</td>
+                    {"".join(model_cells)}
+                    <td class="px-4 py-3">{unc['ehull_min']:.3f}&ndash;{unc['ehull_max']:.3f}</td>
+                    <td class="px-4 py-3">{unc['ed_std']:.3f}</td>
+                    <td class="px-4 py-3">{unc['bias_primary']:+.3f}</td>
+                    <td class="px-4 py-3">{unc['stable_votes']}/{unc['n_models']}</td>
+                    <td class="px-4 py-3{geo_css}">{geo_cell}</td>
+                    <td class="px-4 py-3">{_stability_badge(unc, esc)}</td>
+                  </tr>""")
+
+    committee_bit = ", ".join(
+        f'{esc(m["model"])}' + (f' ({esc(m["head"])})' if m.get("head") else "")
+        for m in meta.get("committee", []))
+    notes = []
+    if meta.get("dropped"):
+        notes.append(f'{len(meta["dropped"])} structure(s) missing for at least one model were '
+                     "excluded from every model's hull.")
+    conflicts = sum(len(v) for v in (meta.get("conflicts") or {}).values())
+    if conflicts:
+        notes.append(f"{conflicts} structure(s) already had a relaxed committee-model version and "
+                     "were excluded.")
+    if meta.get("missing_targets"):
+        notes.append(f'{len(meta["missing_targets"])} selected bulk(s) could not be analysed.')
+    notes_html = "".join(f"<p>{n}</p>" for n in notes)
+
+    return f"""
+        <section>
+          <div class="flex items-center gap-2 mb-4">
+            <i data-lucide="activity" class="w-5 h-5 text-primary"></i>
+            <h2 class="text-xl font-bold text-slate-900">Stability Uncertainty</h2>
+          </div>
+          <div class="bg-white border rounded-xl p-6">
+            <div class="border-l-4 border-primary bg-blue-50 text-slate-700 text-sm rounded-r-lg p-4 mb-5 space-y-2">
+              <p>
+                E<sub>hull</sub> (eV/atom) of each selected bulk under the primary MLIP
+                (<strong>{esc(primary)}</strong>*) and a committee of {committee_bit}. Committee
+                energies are <strong>single points on the {esc(primary)}-relaxed geometries</strong>;
+                every model's hull is built from the same {meta.get('n_common')} structures.
+                In parentheses, for a bulk on the hull: the margin by which it beats its best
+                competitor (another polymorph or a decomposition). The signed distance to the hull of
+                all other structures, &Delta;E<sub>d</sub>, is E<sub>hull</sub> above the hull and that negative
+                margin on it; <strong>&sigma;(&Delta;E<sub>d</sub>)</strong> is its spread over all models and
+                <strong>bias</strong> = primary &minus; committee mean.
+                <strong>Votes</strong> = models with E<sub>hull</sub> &le; {_fmt(meta.get('ehull_threshold'), 2)}.
+              </p>
+              <p>
+                <strong>Geometry shift / limit</strong> (meV/atom): the committee single points are not
+                taken at each model's own minimum. From the single-point forces and the
+                <em>deviatoric</em> stress (a uniform pressure is a systematic lattice offset that largely
+                cancels in E<sub>hull</sub>) the energy each committee model would gain by relaxing is
+                estimated harmonically, for the bulk and for every phase it is compared against on that
+                model's hull:
+              </p>
+              <div class="bg-white border rounded-lg px-4 py-3 font-mono text-xs leading-6 overflow-x-auto">
+                &Delta;E<sub>relax</sub>(s, m) = &lang;|F<sub>i</sub>|<sup>2</sup>&rang; / (2k)
+                  + V<sub>atom</sub> &middot; |&sigma;<sub>dev</sub>|<sup>2</sup> / (4G)<br>
+                &delta;<sub>m</sub> = &Delta;E<sub>relax</sub>(bulk, m)
+                  + &Sigma;<sub>j</sub> x<sub>j</sub> &middot; &Delta;E<sub>relax</sub>(j, m)<br>
+                Geometry shift = max<sub>m</sub> &delta;<sub>m</sub>
+                &nbsp;&nbsp;&nbsp; limit = max(&sigma;(&Delta;E<sub>d</sub>),
+                {_fmt(1000 * floor if floor is not None else None, 1)} meV/atom)
+              </div>
+              <p class="text-xs text-slate-600">
+                s = structure, m = committee model. &lang;|F<sub>i</sub>|<sup>2</sup>&rang;: mean squared force
+                over the atoms (eV<sup>2</sup>/&Aring;<sup>2</sup>); V<sub>atom</sub>: volume per atom
+                (&Aring;<sup>3</sup>); &sigma;<sub>dev</sub> = &sigma; &minus; (tr&nbsp;&sigma;/3)&middot;I, with
+                |&sigma;<sub>dev</sub>|<sup>2</sup> = &Sigma;<sub>ab</sub> &sigma;<sub>dev,ab</sub><sup>2</sup>
+                (GPa<sup>2</sup>; 1 GPa&middot;&Aring;<sup>3</sup> = 6.24 meV); j runs over the phases the bulk is
+                compared against on model m's hull (its decomposition products, or the next-best competitor for a
+                hull phase) with atom fractions x<sub>j</sub>;
+                k = {_fmt(meta.get('force_constant'), 1)} eV/&Aring;<sup>2</sup> (effective force constant),
+                G = {_fmt(meta.get('shear_modulus'), 0)} GPa (shear modulus).
+              </p>
+              <p>
+                A bulk whose shift exceeds the limit is labelled <em>geometry (self)</em> when its own
+                geometry dominates &delta;<sub>m</sub>, or <em>geometry (competing phase)</em> when a phase it
+                is compared against does (named under the value; it need not be one of the bulks listed here).
+              </p>
+              {notes_html}
+              <p class="text-xs text-slate-500">
+                The spread measures disagreement between MLIPs; it is not an error bar calibrated
+                against DFT.
+              </p>
+            </div>
+            <div class="overflow-x-auto border rounded-lg">
+              <table class="w-full text-sm text-left text-slate-700">
+                <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
+                  <tr>
+                    <th class="px-4 py-3">Bulk</th>
+                    {head_cells}
+                    <th class="px-4 py-3">Range</th>
+                    <th class="px-4 py-3"><span class="normal-case">&sigma;(&Delta;E<sub>d</sub>)</span></th>
+                    <th class="px-4 py-3">Bias</th>
+                    <th class="px-4 py-3">Votes</th>
+                    <th class="px-4 py-3">Geometry shift / limit (meV/atom)</th>
+                    <th class="px-4 py-3">Label</th>
+                  </tr>
+                </thead>
+                <tbody>{"".join(rows)}</tbody>
+              </table>
+            </div>
+          </div>
+        </section>"""
+
+
 def _keep_unit_case(html_doc):
     """Table headers and the small metadata labels are styled ``uppercase``,
     which would print "eV" as "EV", "eta" as a capital Eta and
@@ -1173,6 +1435,10 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
     raw_data_filename = "raw_data.json"
 
     n_bulks = len(summaries)
+    unc_present = any(s["bulk"] and s["bulk"].get("uncertainty") for s in summaries)
+    n_robust = sum(1 for s in summaries
+                   if s["bulk"] and (s["bulk"].get("uncertainty") or {}).get("label") == "robust")
+    n_unc = sum(1 for s in summaries if s["bulk"] and s["bulk"].get("uncertainty"))
     n_surfaces = sum(s["n_surfaces"] for s in summaries)
     n_candidates = sum(s["n_reaction_candidates"] for s in summaries)
     etas = [s["best_candidate"]["eta"] for s in summaries if s["best_candidate"]]
@@ -1229,7 +1495,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
     for s in summaries:
         b, uid = s["bulk"], s["structure_uuid"]
         if b:
-            ehull_cell, source_cell = f'{b["ehull"]:.4f}', esc(b["source"])
+            ehull_cell, source_cell = _ehull_with_spread(b, esc), esc(b["source"])
         else:
             ehull_cell = source_cell = "&mdash;"
         e = s.get("electronic") or {}
@@ -1255,6 +1521,10 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
     for s in summaries:
         uid, b = s["structure_uuid"], s["bulk"]
         ehull_bit = f'E<sub>hull</sub> = {b["ehull"]:.4f} eV/atom' if b else "E<sub>hull</sub> unknown"
+        if b and b.get("uncertainty"):
+            unc = b["uncertainty"]
+            ehull_bit += (f' (committee {unc["ehull_min"]:.3f}&ndash;{unc["ehull_max"]:.3f}, '
+                          f'{_stability_badge(unc, esc)})')
         source_bit = esc(b["source"]) if b else "&mdash;"
         mp_id_bit = f' &nbsp;|&nbsp; MP ID: {mp_id_cell(b)}' if (b and mp_id_cell(b) != "&mdash;") else ""
 
@@ -1427,6 +1697,16 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
         light_section = ""
 
     synth_section, synth_models = _synthesizability_section(summaries, esc)
+    uncertainty_section = _uncertainty_section(summaries, esc)
+    if unc_present:
+        robust_tile = f"""
+              <div class="p-3 rounded-xl bg-slate-50 border border-slate-100" title="Bulks stable under every committee MLIP">
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Robust bulks</p>
+                <p class="text-lg font-bold text-slate-900">{n_robust} / {n_unc}</p>
+              </div>"""
+    else:
+        robust_tile = ""
+    summary_cols = "md:grid-cols-6" if unc_present else "md:grid-cols-5"
 
     html_doc = f"""<!doctype html>
 <html lang="en">
@@ -1463,7 +1743,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
             <h2 class="text-xl font-bold text-slate-900">Executive Summary</h2>
           </div>
           <div class="rounded-xl border bg-white shadow-sm p-6">
-            <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
+            <div class="grid grid-cols-2 {summary_cols} gap-4">
               <div class="p-3 rounded-xl bg-slate-50 border border-slate-100">
                 <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Bulk Candidates</p>
                 <p class="text-lg font-bold text-slate-900">{n_bulks}</p>
@@ -1483,7 +1763,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
               <div class="p-3 rounded-xl bg-slate-50 border border-slate-100" title="Bulks whose ML band gap straddles this reaction's redox couple with margin">
                 <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Light-viable</p>
                 <p class="text-lg font-bold text-slate-900">{n_light_cell}</p>
-              </div>
+              </div>{robust_tile}
             </div>
           </div>
         </section>
@@ -1506,11 +1786,13 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                     <th class="px-6 py-3" title="ML-predicted band gap; &plusmn; is the model spread">Gap (eV)</th>
                   </tr>
                 </thead>
-                <tbody>{"".join(bulk_rows) or '<tr><td colspan="6" class="px-6 py-4 text-slate-400 italic">no bulk candidates found</td></tr>'}</tbody>
+                <tbody>{"".join(bulk_rows) or f'<tr><td colspan="6" class="px-6 py-4 text-slate-400 italic">no bulk candidates found</td></tr>'}</tbody>
               </table>
             </div>
           </div>
         </section>
+
+        {uncertainty_section}
 
         {light_section}
 

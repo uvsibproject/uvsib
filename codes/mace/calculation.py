@@ -35,6 +35,8 @@ class MACECalculation(CalcJob):
             input_file = os.path.join(settings.files_path, 'akmc.py')
         elif job_type == 'sqs':
             input_file = os.path.join(settings.files_path, 'sqs.py')
+        elif job_type == 'singlepoint':
+            input_file = os.path.join(settings.files_path, 'singlepoint.py')
         else:
             raise NotImplementedError(f'{job_type} is not implemented.')
 
