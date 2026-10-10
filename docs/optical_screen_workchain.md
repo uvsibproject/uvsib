@@ -6,14 +6,16 @@ parameters control them, how the result is stored, and how it is surfaced in
 the pipeline report.
 
 The short version: after `PhaseDiagramMLWorkChain` has chosen the ML bulk
-selection for a composition, this branch predicts each selected bulk's **band
+selection for a composition, the `optical_screen` stage of `MainWorkChain`
+(right before the surface builder) predicts each selected bulk's **band
 gap** (pretrained ML property models, no SCF), derives absolute **band-edge
 positions** from an empirical relation, computes a photocatalytic **straddle
 verdict** for every implemented reaction/pathway, and writes all of it to
 `DBStructureVersion.band_info`. `pipeline_report.py` then renders it per bulk.
 
-It is **opt-in** (`settings.OPTICAL_SCREEN_ENABLED`, default off) and
-**advisory**: a failure never fails the phase diagram.
+It is **on by default** (`settings.OPTICAL_SCREEN_ENABLED`; disable with
+`optical_screen: {enabled: false}`) and **mandatory** when enabled: a failure
+marks the step and the composition `Failed` and stops the `MainWorkChain`.
 
 ## Source map
 
@@ -26,7 +28,8 @@ It is **opt-in** (`settings.OPTICAL_SCREEN_ENABLED`, default off) and
 | `codes/files/electronic.py` | The staged runner. Predicts the gap (matgl MEGNet multi-fidelity; ALIGNN if importable) and the Butler–Ginley / Mulliken band edges. **No DFT, no SCF.** |
 | `workchains/redox_couples.py` | Maps `(reaction, reaction_path)` → `{u_red, u_ox, role}` and provides `straddle_verdict()`. Single source of truth: the CHE calculators' own `equilibrium_potential`. |
 | `db/utils.py` | `update_structure_band_info()` — sets the `band_info` **column** of one `DBStructureVersion`. |
-| `workchains/phase_diagram.py` | Hosts the `if_(should_run_optical_screen)` branch after `store_stable_structs`. |
+| `workchains/main.py` | Hosts the `optical_screen` stage (before `surface_builder`) and `_construct_optical_screen_builder()`. |
+| `workflows/workflows.py` | `optical_screen` is in `_SHARED_STEP_KEYS`, so `reset_orphaned_compositions()` clears a stale `Running`. |
 | `workchains/pipeline_report.py` | `electronic_for_bulk()`, `bulk_straddle()`, `plot_band_alignment()`, and the "Light Harvesting" report section. |
 | `workflows/settings.py` | `OPTICAL_SCREEN_ENABLED`; reads the `optical_screen:` block of `input.yaml`. |
 
@@ -62,7 +65,7 @@ fills that gap without adding a DFT stage:
 |---|---|---|
 | `chemical_formula` | `Str` | Composition whose ML bulk selection should be screened. |
 
-`PhaseDiagramMLWorkChain._construct_optical_screen_builder()` passes only this.
+`MainWorkChain._construct_optical_screen_builder()` passes only this.
 Everything else is read from `settings.inputs["optical_screen"]`.
 
 `ElectronicWorkChain` inputs (built by `OpticalScreenWorkChain.run_screen()`):
@@ -110,7 +113,7 @@ codes:
 
 | Model key | Meaning |
 |---|---|
-| `megnet_mfi` | matgl `MEGNet-MP-2019.4.1-BandGap-mfi`, queried at `megnet_fidelity`. The workhorse. |
+| `megnet_mfi` | matgl ≥ 4 `MEGNet-BandGap-mfi-MP-2019.4.1` (1.x name `MEGNet-MP-2019.4.1-BandGap-mfi` as fallback), queried at `megnet_fidelity`. The workhorse. |
 | `alignn_pbe` | ALIGNN JARVIS `mp_gappbe_alignn` (optional). |
 | `alignn_mbj` | ALIGNN JARVIS `jv_mbj_bandgap_alignn` (optional; MBJ ≈ experiment). |
 
@@ -243,29 +246,37 @@ composition's `ml_bulk_model`, i.e. the version `PhaseDiagramMLWorkChain`
 ranked — the same row `bulk_candidates()` and `SurfaceBuilderWorkChain` read.
 Overwrites any previous value; returns `False` if no matching version exists.
 
-`OpticalScreenWorkChain` does **not** touch `DBComposition.step_status` — it is
-a branch inside `PhaseDiagramMLWorkChain`, not a `MainWorkChain` stage, so it
-has no step-status key of its own.
+## MainWorkChain integration
 
-## PhaseDiagramMLWorkChain integration
-
-Outline (branch inserted after `store_stable_structs`, before `final_report`):
+A shared (once-per-composition) stage with its own
+`DBComposition.step_status["optical_screen"]` key, placed after the
+phase-diagram / verification / SQS stages and before `surface_builder`:
 
 ```text
 ...
-store_stable_structs
+if_(should_run_sqs)(...)
 if_(should_run_optical_screen)(
+    while_(should_wait_optical_screen)(wait_sleep, check_pythonjob_sleep)
     optical_screen
     inspect_optical_screen
 )
-final_report
+if_(should_run_surface_builder)(...)
+...
 ```
 
 | Method | Behavior |
 |---|---|
-| `should_run_optical_screen` | `False` unless `settings.OPTICAL_SCREEN_ENABLED` **and** `stable_struct["ml_uuid_list"]` is non-empty. |
-| `optical_screen` | Builds and submits `OpticalScreenWorkChain`. Builder construction is wrapped in `try/except` so a misconfigured code is logged, not raised. |
-| `inspect_optical_screen` | **Advisory**: logs if the sub-workflow did not finish OK and continues. The phase diagram never fails on the light screen. |
+| `should_run_optical_screen` | `False` if `settings.OPTICAL_SCREEN_ENABLED` is off, the step is already `Done`, or `stable_struct["ml_uuid_list"]` is empty (e.g. SQS-only runs) -- a skip, not a failure. Not affected by `soft_stop.before_surface_builder`. |
+| `should_wait_optical_screen` | Waits while a sibling `MainWorkChain` (another reaction on the same composition) has the step `Running`. |
+| `optical_screen` | Re-checks `Done`, sets the step `Running`, submits `OpticalScreenWorkChain`. A submit error (e.g. no `Electronic` code) sets the step and composition `Failed` and exits 300. |
+| `inspect_optical_screen` | **Mandatory**: if the sub-workflow did not finish OK, sets the step and composition `Failed` and exits 300 -- the surface builder and everything after it do not run. Otherwise sets the step `Done`. |
+
+To re-screen a composition (e.g. after a model fix), delete or reset its
+`step_status["optical_screen"]` and resubmit; only this stage re-runs.
+
+Note: `status == "unavailable"` from the runner (no gap model importable) is
+**not** a failure of `OpticalScreenWorkChain`; the step finishes `Done` with
+null gaps. Check `band_info["notes"]` / the job stdout.
 
 ## Optional: gating the surface builder
 
@@ -328,9 +339,8 @@ flows into `raw_data.json` unchanged. `render_html_report()` adds:
 | 200 | `ERROR_NO_RETRIEVED_FOLDER` | Retrieved folder inaccessible. |
 | 303 | `ERROR_OUTPUT_INCOMPLETE` | `output.json` present but malformed. |
 
-Note: because the phase-diagram branch is advisory, none of these propagate to
-`MainWorkChain` — they are visible in the `OpticalScreenWorkChain` node and in
-the `PhaseDiagramMLWorkChain` report log only.
+Any of these makes `OpticalScreenWorkChain` not finish OK, which fails the
+`MainWorkChain` stage (`MainWorkChain` exit 300, `step_status["optical_screen"] = "Failed"`).
 
 ## Practical change notes
 
@@ -357,5 +367,6 @@ the `PhaseDiagramMLWorkChain` report log only.
 - **`direct_gap`** is a stored `null` today. Wiring an ALIGNN direct/indirect
   classifier only needs `build_band_info` to fill it; the report column already
   renders it.
-- **Advisory by design.** Do not make `inspect_optical_screen` return an exit
-  code — the phase diagram must not fail because a gap model was missing.
+- **Mandatory by design.** `MainWorkChain.inspect_optical_screen` stops the
+  pipeline on failure, so the surface builder (and its optional optical gate)
+  never runs on un-screened bulks.

@@ -4,7 +4,7 @@ from sqlalchemy import inspect, delete, text, func, not_
 from pymatgen.core import Composition, Structure
 from uvsib.db.session import get_session
 from uvsib.db.tables import (DBChemsys, DBStructure, DBStructureVersion, DBSurface,
-                             DBSurfaceMLAdsorbate, DBAkmcEvent, DBSynthesizability)
+                             DBSurfaceMLAdsorbate, DBSynthesizability)
 
 
 # EhullUncertaintyWorkChain stores committee single points (energy of a committee
@@ -48,23 +48,22 @@ def add_surface_ml_adsorbate(existing_uuid, surf_id, surface_miller_index, comp,
         session.commit()
     return True
 
-def add_akmc_events(events):
-    """Bulk-insert AKMC dimer-search events as DBAkmcEvent rows.
-
-    Parameters
-    ----------
-    events : list of dict
-        Each dict supplies the DBAkmcEvent columns (source_row_id, energies,
-        barrier, rate, kmc_selected, atoms_json blobs, etc).
-    """
-    if not events:
-        return []
-    with get_session() as session:
-        db_events = [DBAkmcEvent(**event) for event in events]
-        session.add_all(db_events)
-        session.commit()
-    return db_events
-
+#def add_akmc_events(events):
+#    """Bulk-insert AKMC dimer-search events as DBAkmcEvent rows.
+#
+#    Parameters
+#    ----------
+#    events : list of dict
+#        Each dict supplies the DBAkmcEvent columns (source_row_id, energies,
+#        barrier, rate, kmc_selected, atoms_json blobs, etc).
+#    """
+#    if not events:
+#        return []
+#    with get_session() as session:
+#        db_events = [DBAkmcEvent(**event) for event in events]
+#        session.add_all(db_events)
+#        session.commit()
+#    return db_events
 
 def merge_row_attributes(table_class, row_id, new_attributes):
     """Merge ``new_attributes`` into ``table_class.attributes`` (JSONB) for the

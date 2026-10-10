@@ -73,6 +73,14 @@ class MainWorkChain(WorkChain):
                 cls.sqs,
                 cls.inspect_sqs
             ),
+            if_(cls.should_run_optical_screen)(
+                while_(cls.should_wait_optical_screen)(
+                    cls.wait_sleep,
+                    cls.check_pythonjob_sleep
+                ),
+                cls.optical_screen,
+                cls.inspect_optical_screen
+            ),
             if_(cls.should_run_surface_builder)(
                 while_(cls.should_wait_surface_builder)(
                     cls.wait_sleep,
@@ -174,6 +182,20 @@ class MainWorkChain(WorkChain):
             return False
         return True
 
+    def should_run_optical_screen(self):
+        """Check whether should run OpticalScreen (no-DFT light-harvesting
+        screen of the ML bulk selection). Runs even under the surface soft
+        stop: it annotates the bulks, like the phase-diagram stages before it."""
+        if not settings.OPTICAL_SCREEN_ENABLED:
+            return False
+        if self._fresh_step_status().get("optical_screen") in ["Done"]:
+            return False
+        stable = self.ctx.dbcomposition_row.stable_struct or {}
+        if not stable.get("ml_uuid_list"):
+            self.report("Optical screen: no ML bulk selection to screen; skipping.")
+            return False
+        return True
+
     def should_run_surface_builder(self):
         """Check whether should run SurfaceBuilder"""
         if settings.SOFT_STOP_BEFORE_SURFACE:
@@ -256,6 +278,13 @@ class MainWorkChain(WorkChain):
         step_status = self._fresh_step_status().get("sqs")
         if step_status in ["Running"]:
             self.ctx.sts = "sqs"
+            return True
+        return False
+
+    def should_wait_optical_screen(self):
+        """Should wait for another running WorkChain"""
+        if self._fresh_step_status().get("optical_screen") in ["Running"]:
+            self.ctx.sts = "optical screen"
             return True
         return False
 
@@ -421,6 +450,47 @@ class MainWorkChain(WorkChain):
 
         # update row status in DBComposition table
         update_step_status_path(DBComposition, row.uuid, ["sqs"], "Done")
+        update_row(DBComposition, row.uuid, {"status": "Running"})
+
+    def optical_screen(self):
+        """Running OpticalScreenWorkChain. Mandatory when enabled: a failure,
+        including a missing `Electronic` code, stops the MainWorkChain."""
+        # Re-check after waiting: another MainWorkChain may have completed it.
+        if self._step_done("optical_screen"):
+            self.report(
+                f"Skipping OpticalScreen WorkChain for {self.ctx.chemical_formula}: "
+                "it was completed by another WorkChain."
+            )
+            return
+
+        row = self.ctx.dbcomposition_row
+        update_step_status_path(DBComposition, row.uuid, ["optical_screen"], "Running")
+        update_row(DBComposition, row.uuid, {"status": "Running"})
+        try:
+            builder = self._construct_optical_screen_builder()
+            future = self.submit(builder)
+        except Exception as exc:  # e.g. the `Electronic` code is not configured
+            update_step_status_path(DBComposition, row.uuid, ["optical_screen"], "Failed")
+            update_row(DBComposition, row.uuid, {"status": "Failed"})
+            self.report(f"Cannot submit OpticalScreen WorkChain ({exc})")
+            return self.exit_codes.ERROR_CALCULATION_FAILED
+        self.to_context(**{"optical_screen": future})
+
+    def inspect_optical_screen(self):
+        """Inspecting OpticalScreenWorkChain"""
+        # return if WorkChain was not set
+        if "optical_screen" not in self.ctx:
+            return
+
+        wch = self.ctx.optical_screen
+        row = self.ctx.dbcomposition_row
+        if not wch.is_finished_ok:
+            update_step_status_path(DBComposition, row.uuid, ["optical_screen"], "Failed")
+            update_row(DBComposition, row.uuid, {"status": "Failed"})
+            self.report(f"OpticalScreen WorkChain failed (exit {wch.exit_status})")
+            return self.exit_codes.ERROR_CALCULATION_FAILED
+
+        update_step_status_path(DBComposition, row.uuid, ["optical_screen"], "Done")
         update_row(DBComposition, row.uuid, {"status": "Running"})
 
     def surface_builder(self):
@@ -590,6 +660,13 @@ class MainWorkChain(WorkChain):
         """Build PDVerification WorkChain builder"""
         PDVerificationWorkChain = WorkflowFactory("pdverification")
         builder = PDVerificationWorkChain.get_builder()
+        builder.chemical_formula = Str(self.ctx.chemical_formula)
+        return builder
+
+    def _construct_optical_screen_builder(self):
+        """OpticalScreen WorkChain builder (no-DFT light-harvesting screen)"""
+        OpticalScreenWorkChain = WorkflowFactory("opticalscreen")
+        builder = OpticalScreenWorkChain.get_builder()
         builder.chemical_formula = Str(self.ctx.chemical_formula)
         return builder
 

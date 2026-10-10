@@ -1,8 +1,9 @@
 """OpticalScreenWorkChain -- no-DFT light-harvesting screen.
 
-A ``PhaseDiagramMLWorkChain`` branch (run after the ML bulk selection, gated by
-``settings.OPTICAL_SCREEN_ENABLED``). For the composition's selected ML bulk
-structures it:
+A mandatory ``MainWorkChain`` step (``step_status["optical_screen"]``), run after
+the phase-diagram / SQS stages and before ``SurfaceBuilderWorkChain``, gated by
+``settings.OPTICAL_SCREEN_ENABLED``; a failure stops the MainWorkChain. For the
+composition's selected ML bulk structures it:
 
 1. submits one ``ElectronicWorkChain`` job that predicts, without any DFT, the
    band gap (pretrained ML property models) and the Butler--Ginley / Mulliken

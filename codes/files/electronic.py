@@ -50,16 +50,31 @@ _MEGNET_MFI = {0: "PBE", 1: "GLLB-SC", 2: "HSE", 3: "SCAN"}
 
 # lazily loaded, then reused across all input structures in the job
 _MEGNET_MODEL = None
+_MEGNET_MODEL_NAME = None
+
+# matgl >= 2 (PyG backend) renamed the model; the 1.x name is kept as a fallback.
+# matgl 1.1.3 (DGL) gives unphysical gaps with this model (e.g. MgO ~0.3 eV at
+# HSE fidelity) -- see docs/venv_electronic_build.md -- so use matgl >= 4.
+_MEGNET_NAMES = ("MEGNet-BandGap-mfi-MP-2019.4.1", "MEGNet-MP-2019.4.1-BandGap-mfi")
 
 
 # --------------------------------------------------------------------------- #
 # ML band-gap models
 # --------------------------------------------------------------------------- #
 def _load_megnet():
-    global _MEGNET_MODEL
+    global _MEGNET_MODEL, _MEGNET_MODEL_NAME
     if _MEGNET_MODEL is None:
         import matgl
-        _MEGNET_MODEL = matgl.load_model("MEGNet-MP-2019.4.1-BandGap-mfi")
+        errors = []
+        for name in _MEGNET_NAMES:
+            try:
+                _MEGNET_MODEL = matgl.load_model(name)
+                _MEGNET_MODEL_NAME = f"{name} (matgl {matgl.__version__})"
+                break
+            except Exception as exc:  # noqa: BLE001 - unknown name on this matgl version
+                errors.append(f"{name}: {exc}")
+        else:
+            raise RuntimeError("no MEGNet band-gap model loadable: " + "; ".join(errors))
     return _MEGNET_MODEL
 
 
@@ -223,6 +238,7 @@ def run(models, cfg):
             "models_requested": models,
             "models_used": usable,
             "megnet_fidelity": cfg["megnet_fidelity"],
+            "megnet_model": _MEGNET_MODEL_NAME,
             "pH": cfg["pH"],
             "gap_window_eV": [cfg["gap_min"], cfg["gap_max"]],
         },

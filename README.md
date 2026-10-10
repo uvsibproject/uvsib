@@ -136,15 +136,12 @@ holding only what that one runner (`codes/files/*.py`) needs. These are **not** 
 
 **Band-gap / light-harvesting screen** (`electronic` code — see `docs/venv_electronic_build.md`):
 
-- `matgl==1.1.3` — MEGNet multi-fidelity band-gap model (`megnet_mfi`, the workhorse; PBE / GLLB-SC / HSE / SCAN fidelities);
-- `dgl==2.1.0` — DGL backend required by matgl 1.x;
-- `torch==2.2.0` (CPU build) and `torchdata==0.7.1`;
-- `numpy<2` (dgl 2.1.0 is built against the NumPy 1.x ABI);
-- `lightning==2.2.5`, `pydantic`, `pydantic-settings`, `pyparsing<3`;
-- `alignn==2024.5.27` + `jarvis-tools` — optional ALIGNN (`alignn_pbe`, `alignn_mbj`) cross-check;
-- `pymatgen`, `ase` — structure I/O and Mulliken-electronegativity band edges.
+- `matgl==4.1.0` (PyG backend) — MEGNet multi-fidelity band-gap model (`megnet_mfi`, the workhorse; PBE / GLLB-SC / HSE / SCAN fidelities). Not 1.1.3: that stack gives unphysical gaps;
+- `alignn==2024.5.27` + `jarvis-tools` — ALIGNN (`alignn_pbe`, `alignn_mbj`) cross-check;
+- `dgl==2.4.0` (needed by alignn) and `torch==2.4.0` (CPU build; highest dgl 2.4 accepts), Python 3.12;
+- `pymatgen` — structure I/O and Mulliken-electronegativity band edges.
 
-  The pretrained models (`MEGNet-MP-2019.4.1-BandGap-mfi`, optional ALIGNN zips) must be **pre-staged**
+  The pretrained models (`MEGNet-BandGap-mfi-MP-2019.4.1` from the Hugging Face Hub, ALIGNN zips) must be **pre-staged**
   into the cache; compute nodes cannot download them at run time.
 
 **ML interatomic potentials** (one env per backend): `mattersim`, `mace-torch` (MACE), `upet` (uPET),

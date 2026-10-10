@@ -13,7 +13,7 @@ where `aiida.py` is [`uvsib/codes/files/electronic.py`](../codes/files/electroni
 staged verbatim. So this venv only has to satisfy that one script:
 
 * `matgl` — MEGNet multi-fidelity band-gap model (`megnet_mfi`, the workhorse)
-* `alignn` + `jarvis-tools` — optional ALIGNN cross-check (`alignn_pbe`, `alignn_mbj`)
+* `alignn` + `jarvis-tools` — ALIGNN cross-check (`alignn_pbe`, `alignn_mbj`)
 * `pymatgen` — structure I/O and Mulliken electronegativity
 
 **Host:** `rosi4.fz-rossendorf.de`
@@ -22,23 +22,22 @@ staged verbatim. So this venv only has to satisfy that one script:
 
 ---
 
-## 1. Why these versions (do not "just upgrade")
-
-`aiida.py` is written against the **DGL-era matgl 1.x** and the **pre-ALIGNN2**
-`alignn.pretrained.get_prediction(model_name=...)` API. Newer releases break it:
+## 1. Why these versions
 
 | package | pin | reason |
 |---|---|---|
-| `matgl` | `==1.1.3` | Last DGL-backend line. 2.x moved to a PyG backend, renamed/relocated the pretrained-model repo, and dropped `MEGNet-MP-2019.4.1-BandGap-mfi` from the old download URL. |
-| `dgl` | `==2.1.0` | Required by matgl 1.x MEGNet. Linux/x86-64 **CPU** wheel from `https://data.dgl.ai/wheels/repo.html`. Built against torch 2.2. |
-| `torch` | `==2.2.0+cpu` | Matches dgl 2.1.0. **CPU on purpose** — the `gpu-a100` node driver is CUDA 12.2, too old for the cu13 torch that used to be here; ML inference on a handful of structures is sub-second on CPU. |
-| `torchdata` | `==0.7.1` | matgl 1.1.3 caps it `<0.8`; 0.7.1 pairs with torch 2.2. |
-| `numpy` | `<2` | dgl 2.1.0 is built against the NumPy 1.x ABI. |
-| `alignn` | `==2024.5.27` | Still has `mp_gappbe_alignn` / `jv_mbj_bandgap_alignn` and the classic `get_prediction`. 2025+/2026 releases are ALIGNN2 (`ALIGNN2_MODELS`, new API) and a broken legacy shim. |
-| `lightning` | `==2.2.5` | Era-appropriate for matgl 1.1.3 (`import lightning.pytorch`). |
+| `matgl` | `==4.1.0` | PyG backend. **Do not use matgl 1.1.3** (the previous pin): with it, `MEGNet-MP-2019.4.1-BandGap-mfi` gives unphysical gaps — MgO 0.27 eV at HSE fidelity (exp 7.8), SnO₂/KTaO₃/CeO₂ ≈ 0 eV, HSE < PBE, and gaps jumping by >2 eV for a 0.05 Å lattice change. matgl 4.1.0 serves the same model as `MEGNet-BandGap-mfi-MP-2019.4.1` and behaves (see §6). |
+| `alignn` | `==2024.5.27` | Still has `mp_gappbe_alignn` / `jv_mbj_bandgap_alignn` and the classic `get_prediction`. 2025+/2026 releases are ALIGNN2 (`ALIGNN2_MODELS`, new API) and a broken legacy shim. Needs DGL. |
+| `dgl` | `==2.4.0` | Required by alignn 2024.5.27 (matgl 4.x no longer uses it). Last DGL line; CPU wheel from `https://data.dgl.ai/wheels/torch-2.4/repo.html`; requires `torch<=2.4.0`. |
+| `torch` | `==2.4.0+cpu` | Highest torch dgl 2.4.0 accepts. **CPU on purpose** — the `gpu-a100` node driver is CUDA 12.2, too old for recent cu torch; inference on a handful of structures is sub-second on CPU. |
+| `numpy` | `1.26.x` (resolved) | dgl is built against the NumPy 1.x ABI. |
 | `pymatgen` | latest ok | Only `Structure` + `Element.ionization_energy/electron_affinity` are used. |
 
-Python: **3.10** (matches the DGL / torch 2.2 wheels).
+Python: **3.12** (matgl 4.x needs ≥ 3.11).
+
+`electronic.py` loads the MEGNet model by its matgl ≥ 2 name first and falls back to
+the 1.x name, and records the model + matgl version in `output.json`
+(`config.megnet_model`), so results from the broken stack can be told apart.
 
 ---
 
@@ -57,53 +56,47 @@ cd /bigdata/casus/fwuk/mirho50
 mv venv_electronic venv_electronic.old.$(date +%Y%m%d)
 
 export UV_HTTP_TIMEOUT=180
-~/.local/bin/uv venv --python 3.10 /bigdata/casus/fwuk/mirho50/venv_electronic
+V=/bigdata/casus/fwuk/mirho50/venv_electronic
+~/.local/bin/uv venv --python 3.12 $V
 
 ~/.local/bin/uv pip install \
-  --python /bigdata/casus/fwuk/mirho50/venv_electronic/bin/python \
+  --python $V/bin/python \
   --index-strategy unsafe-best-match \
   --extra-index-url https://download.pytorch.org/whl/cpu \
-  --find-links https://data.dgl.ai/wheels/repo.html \
-  "torch==2.2.0+cpu" "torchdata==0.7.1" "numpy<2" \
-  "dgl==2.1.0" \
-  "matgl==1.1.3" "alignn==2024.5.27" \
-  jarvis-tools pymatgen ase "lightning==2.2.5" pydantic pydantic-settings "pyparsing<3"
+  --find-links https://data.dgl.ai/wheels/torch-2.4/repo.html \
+  "torch==2.4.0+cpu" "dgl==2.4.0" \
+  "matgl==4.1.0" "alignn==2024.5.27" \
+  jarvis-tools pymatgen
 ```
 
-The install copies ~3 GB into `/bigdata` (uv warns it can't hardlink across
-filesystems — expected, ignore). A verified lockfile lives beside the venv as
-`venv_electronic.freeze.pinned_YYYYMMDD.txt`; regenerate with
-`uv pip freeze --python .../venv_electronic/bin/python`.
+The install copies a few GB into `/bigdata` (uv warns it can't hardlink across
+filesystems — expected, ignore). Write a lockfile beside the venv:
+`uv pip freeze --python $V/bin/python > venv_electronic.freeze.pinned_YYYYMMDD.txt`.
 
 ---
 
 ## 3. Pre-stage the pretrained models (mandatory)
 
-Compute nodes cannot download these at run time:
+Compute nodes cannot download at run time.
 
-* matgl 1.1.3's built-in URL (`github.com/materialsvirtuallab/matgl/raw/main/pretrained_models/`)
-  now **404s** — the repo was renamed and `pretrained_models/` deleted from `main`.
-  The files still exist on the **`v1.1.3` tag**.
-* ALIGNN's baked figshare URL uses `figshare.com/ndownloader/...`, which returns
-  **HTTP 202 with an empty body**. The `ndownloader.figshare.com` host works.
-
-matgl reads `~/.cache/matgl/<model>/` first, so a populated cache means no download:
+**MEGNet** — matgl 4.x fetches `materialyze/MEGNet-BandGap-mfi-MP-2019.4.1` from the
+Hugging Face Hub into `~/.cache/matgl/` (HF cache layout: `models--materialyze--…`).
+Populate it once from the login node; afterwards it loads with `HF_HUB_OFFLINE=1`:
 
 ```bash
-M=MEGNet-MP-2019.4.1-BandGap-mfi
-D=$HOME/.cache/matgl/$M
-mkdir -p "$D"
-for f in model.json model.pt state.pt; do
-  curl -sSL --fail -o "$D/$f" \
-    "https://github.com/materialsvirtuallab/matgl/raw/v1.1.3/pretrained_models/$M/$f"
-done
+source $V/bin/activate
+python -c "import matgl; matgl.load_model('MEGNet-BandGap-mfi-MP-2019.4.1')"
 ```
 
-ALIGNN caches its zip next to the package. Only needed if `models` ever includes an
-`alignn_*` entry (the workchain default is `megnet_mfi` only):
+(The old `~/.cache/matgl/MEGNet-MP-2019.4.1-BandGap-mfi/` folder is the matgl 1.x
+copy; matgl 4.x ignores it.)
+
+**ALIGNN** caches its zip next to the package. The baked figshare URL
+(`figshare.com/ndownloader/...`) returns HTTP 202 with an empty body; the
+`ndownloader.figshare.com` host works. Copy them from a previous venv or download:
 
 ```bash
-AP=/bigdata/casus/fwuk/mirho50/venv_electronic/lib/python3.10/site-packages/alignn
+AP=$V/lib/python3.12/site-packages/alignn
 curl -sSL --fail -o "$AP/mp_gappbe_alignn.zip"     https://ndownloader.figshare.com/files/31458814
 curl -sSL --fail -o "$AP/jv_mbj_bandgap_alignn.zip" https://ndownloader.figshare.com/files/31458694
 ```
@@ -119,15 +112,18 @@ first — the download branch only fires when the file is absent.
 RUN=/bigdata/casus/fwuk/mirho50/aiida_calculations/uvsib/2e/d3/a6a7-49e0-4557-b2dd-d799ed3f6fb4
 T=/tmp/electronic_itest; rm -rf $T; mkdir -p $T; cd $T
 cp "$RUN/aiida.py" "$RUN/input_structures.json" .   # or any real staged inputs
+cp <repo>/uvsib/codes/files/electronic.py aiida.py   # the current script, if newer
 source /bigdata/casus/fwuk/mirho50/venv_electronic/bin/activate
-/bigdata/casus/fwuk/mirho50/bin/run_aiida_python \
-  --models=megnet_mfi --megnet_fidelity=2 --gap_min=0.4 --gap_max=3.1 --pH=0.0
+HF_HUB_OFFLINE=1 /bigdata/casus/fwuk/mirho50/bin/run_aiida_python \
+  --models=megnet_mfi,alignn_mbj --megnet_fidelity=2 --gap_min=0.4 --gap_max=3.1 --pH=0.0
 python -c "import json; d=json.load(open('output.json')); \
-print(d['status'], d['config']['models_used']); \
-[print(r['uuid'][:8], r['band_info']['gap_eV']) for r in d['results']]"
+print(d['status'], d['config']['models_used'], d['config'].get('megnet_model')); \
+[print(r['uuid'][:8], r['band_info']['gap_values_eV']) for r in d['results']]"
 ```
 
-Expect `ok  ['megnet_mfi']` and a **non-null** `gap_eV` per structure.
+Expect `ok ['megnet_mfi', 'alignn_mbj'] MEGNet-BandGap-mfi-MP-2019.4.1 (matgl 4.1.0)`.
+For that run (three ZnO bulks) both models give ≈ 1.9–2.5 eV; the matgl 1.1.3 stack
+gave 0.18–0.93 eV.
 
 Also check activation itself (catches the non-relocatable-venv trap):
 
@@ -135,31 +131,43 @@ Also check activation itself (catches the non-relocatable-venv trap):
 bash -c "source /bigdata/casus/fwuk/mirho50/venv_electronic/bin/activate; command -v python && python --version"
 ```
 
-Then swap: `mv venv_electronic.old.* /somewhere` or delete once happy. No AiiDA
-code-node change is needed — the YAML `source`s the same path.
+Then remove `venv_electronic.old.*` once happy. No AiiDA code-node change is
+needed — the YAML `source`s the same path.
 
 ---
 
 ## 5. Known-harmless noise
 
-* `matgl … Incompatible model version detected!` on model load — the model still
-  loads and predicts.
-* `DGL backend not selected … Setting the default backend to "pytorch"` — first-run
-  only; writes `~/.dgl/config.json`.
 * `pytorch-lightning` may appear in the freeze next to `lightning`; unused, harmless.
 * No CUDA / `torch.cuda.is_available() == False` — intentional (see §1).
 
 ---
 
-## 6. If you must upgrade later
+## 6. Calibration reference (2026-10-10)
 
-* Bumping `matgl` past 1.x means rewriting `megnet_gap()` in `electronic.py` for the
-  PyG backend **and** sorting out model hosting (matgl ≥ 2 fetches from elsewhere).
+27 textbook solids (experimental lattice constants, approximate experimental gaps).
+MAE vs experiment, eV:
+
+| model | all 27 | non-magnetic, gap ≤ 4.5 eV (17) | TM oxides (9) |
+|---|---|---|---|
+| megnet HSE, matgl 1.1.3 (old stack) | 2.22 | 1.43 | 2.15 |
+| megnet HSE, matgl 4.1.0 | 0.99 | 0.70 | 1.15 |
+| megnet GLLB-SC, matgl 4.1.0 | 0.94 | 0.78 | 1.15 |
+| alignn_mbj | 1.06 | 0.65 | 1.88 |
+
+`alignn_mbj` collapses to ≈ 0 eV for Cu₂O, NiO, MnO and is poor for Fe₂O₃; no model
+here handles magnetic TM oxides reliably. Script and raw results:
+`/bigdata/casus/fwuk/mirho50/gap_calib_claude/`.
+
+---
+
+## 7. If you must upgrade later
+
 * Bumping `alignn` into ALIGNN2 territory means rewriting `alignn_gap()` against
   `alignn.pretrained.ALIGNN2_MODELS` and the new predict entrypoint; the gap model
   keys also change (e.g. `optb88vdw_bandgap_radius`, `mbj_bandgap_radius`,
-  `snumat_Band_gap_HSE_radius`).
-* `dgl` publishes no new Linux wheels beyond the 2.x line on `data.dgl.ai`; staying
-  on the DGL backend effectively pins torch to ≤ 2.4.
+  `snumat_Band_gap_HSE_radius`). That would also drop DGL and unpin torch.
+* `dgl` publishes no Linux wheels beyond the 2.4 line on `data.dgl.ai`; while
+  alignn 2024.5.27 is in the venv, torch stays at ≤ 2.4.0.
 * `alignn_gap()` already tolerates both scalar and 1-element-list returns from
   `get_prediction` (see [`electronic.py`](../codes/files/electronic.py)).

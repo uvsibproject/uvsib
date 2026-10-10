@@ -64,12 +64,14 @@ DIFFCSP_ENABLED = bool(inputs.get('diffcsp', {}).get('enabled', True))
 AKMC_ENABLED = bool(inputs.get('akmc', {}).get('enabled', False))
 
 # No-DFT electronic / light-harvesting screen (ML band gap + Butler-Ginley band
-# edges + photocatalytic straddle test) as a PhaseDiagramMLWorkChain branch,
-# right after the ML bulk selection. On by default; disable via input.yaml
-# (`optical_screen: {enabled: false}`). Needs a dedicated `Electronic` code (see
+# edges + photocatalytic straddle test) as a MainWorkChain step
+# (step_status["optical_screen"]) after the phase-diagram / SQS stages and
+# before the surface builder; it also runs under the surface soft stop. On by
+# default; disable via input.yaml (`optical_screen: {enabled: false}`). Needs a dedicated `Electronic` code (see
 # config.yaml) whose environment provides the pretrained gap models (matgl,
 # optionally alignn). Mandatory when enabled: a failure (including a missing
-# `Electronic` code) fails PhaseDiagramMLWorkChain (exit 304).
+# `Electronic` code) marks the step and composition Failed and stops the
+# MainWorkChain (exit 300).
 # `optical_screen.gate_surface_builder: true` additionally restricts the bulks
 # handed to SurfaceBuilderWorkChain to those predicted to absorb visible light
 # (reaction-agnostic gap window).
@@ -77,7 +79,7 @@ OPTICAL_SCREEN_ENABLED = bool(inputs.get('optical_screen', {}).get('enabled', Tr
 
 # CSLLM synthesizability / synthesis-method / precursor prediction
 # (SynthesizabilityScreenWorkChain) as a PhaseDiagramMLWorkChain branch, run
-# after the optical screen on the bulks that passed the E_above_hull screen.
+# after the ML bulk selection on the bulks that passed the E_above_hull screen.
 # It never filters structures. On by default; disable via input.yaml
 # (`synthesizability: {enabled: false}`). Needs a dedicated GPU `CSLLM` code
 # and the CSLLM weights (see config.yaml and docs/synthesizability_workchain.md).

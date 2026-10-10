@@ -21,7 +21,6 @@ low-energy structures in `DBComposition.stable_struct["ml_uuid_list"]`.
 | `workchains/utils.py` | Shared hull filtering, reference entry lookup, MPDB import, structure matching, code/model lookup. |
 | `workchains/pythonjob_inputs.py` | Small polling functions used by `PythonJob`, especially `is_data_available`. |
 | `workflows/settings.py` | Reads `input.yaml` / `config.yaml` and exposes global toggles and thresholds. |
-| `workchains/optical_screen.py` | Optional `if_`-gated branch after `store_stable_structs` (no-DFT light-harvesting screen). See `docs/optical_screen_workchain.md`. |
 
 ## Inputs
 
@@ -56,17 +55,13 @@ if should_run_gen:
 wait_for_data
 check_pythonjob
 store_stable_structs
-if should_run_optical_screen:          # settings.OPTICAL_SCREEN_ENABLED, opt-in
-    optical_screen
-    inspect_optical_screen             # advisory: never fails the phase diagram
 final_report
 ```
 
-The `optical_screen` branch submits `OpticalScreenWorkChain` on the ML bulk
-selection and writes a no-DFT band gap / band-edge / photocatalytic-straddle
-payload to `DBStructureVersion.band_info`. It is disabled unless
-`input.yaml` has `optical_screen: {enabled: true}` and a `config.yaml`
-`Electronic` code. Full details in `docs/optical_screen_workchain.md`.
+The no-DFT light-harvesting screen (`OpticalScreenWorkChain`) is **not** part of
+this work chain: it is a mandatory `MainWorkChain` stage (`optical_screen`) that
+runs on this work chain's ML bulk selection right before the surface builder.
+See `docs/optical_screen_workchain.md`.
 
 The child workflows are submitted through `WorkflowFactory`:
 

@@ -26,6 +26,15 @@ def pmg_to_ase(pmg_structure):
     cell = pmg_structure.lattice.matrix
     return Atoms(symbols=symbols, scaled_positions=scaled_positions, cell=cell, pbc=True)
 
+def is_garbage(atoms, max_cell_component=100.0):
+    """
+    Sanity check for blown-up cells: a variable-cell relaxation can "converge"
+    with fragments pulled apart in vacuum (zero force/stress), often with an
+    unphysically low MLIP energy. Flags any lattice-vector Cartesian component
+    larger than ``max_cell_component`` (Angstrom).
+    """
+    return any(abs(v) > max_cell_component for vec in atoms.cell.array for v in vec)
+
 def relax_structures(calc, fmax, max_steps):
     """
     Relax a list of ASE Atoms objects 
@@ -54,7 +63,8 @@ def relax_structures(calc, fmax, max_steps):
             opt = FIRE(cell_filter, logfile="opt.log")
             opt.run(fmax=fmax, steps=max_steps)
 
-        if opt.converged:
+        # blown-up cells are dropped and counted as failed, like non-converged ones
+        if opt.converged and not is_garbage(atoms):
             energy = float(atoms.get_potential_energy())
             energies.append(energy)
             pmg_structure = ase_to_pmg(atoms)

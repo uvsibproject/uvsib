@@ -1,6 +1,6 @@
 """SynthesizabilityScreenWorkChain -- CSLLM synthesizability / method / precursors.
 
-A ``PhaseDiagramMLWorkChain`` branch (run after the optical screen, gated by
+A ``PhaseDiagramMLWorkChain`` branch (run after the ML bulk selection, gated by
 ``settings.SYNTHESIZABILITY_ENABLED``). For every bulk in the composition's ML
 selection -- the structures that passed the E_above_hull screen in
 ``store_stable_structs`` -- it:

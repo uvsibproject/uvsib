@@ -130,6 +130,7 @@ class GeneratorWorkChain(WorkChain):
 
             low_energy_entries = unique_low_energy_chemsys(chemical_system, new_entries,
                                                            EHULL_ML,
+                                                           min_n_return=1,
                                                            element_entries=self.ctx.ref_entries)
 
             if not low_energy_entries:

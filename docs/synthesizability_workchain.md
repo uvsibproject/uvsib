@@ -6,7 +6,7 @@ are stored, and how they appear in the pipeline report.
 
 The short version: after `PhaseDiagramMLWorkChain` has chosen the ML bulk
 selection for a composition (the bulks that passed the E_above_hull screen),
-and after the optical screen, this branch runs
+this branch runs
 [CSLLM](https://github.com/szl666/CSLLM) (Song et al., *Nat. Commun.* **16**,
 6530 (2025)) on every selected bulk and stores, per bulk:
 
@@ -30,7 +30,7 @@ phase diagram.
 | `codes/files/csllm.py` | The staged runner: loads the LLaMA3-8B base once, attaches the three CSLLM LoRA adapters, and scores or generates. |
 | `db/tables.py` | `DBSynthesizability` — one row per `(structure_uuid, synthesizability_model)`. |
 | `db/utils.py` | `upsert_synthesizability()` — a rerun replaces the previous row. |
-| `workchains/phase_diagram.py` | Hosts the `if_(should_run_synthesizability)` branch after the optical screen. |
+| `workchains/phase_diagram.py` | Hosts the `if_(should_run_synthesizability)` branch after `store_stable_structs`. |
 | `workchains/pipeline_report.py` | `synthesizability_for_bulk()` and the "Synthesizability" report section. |
 | `workflows/settings.py` | `SYNTHESIZABILITY_ENABLED`; reads the `synthesizability:` block of `input.yaml`. |
 
@@ -39,8 +39,7 @@ phase diagram.
 ```text
 PhaseDiagramMLWorkChain
   ... store_stable_structs            # E_above_hull screen -> stable_struct.ml_selection
-  if optical_screen:  OpticalScreenWorkChain
-  if synthesizability: SynthesizabilityScreenWorkChain   # sequential, after the optical screen
+  if synthesizability: SynthesizabilityScreenWorkChain
   final_report
 ```
 

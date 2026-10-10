@@ -1,6 +1,5 @@
 import os
 import yaml
-import numpy as np
 from aiida.orm import load_code
 from pymatgen.core.structure import Composition, Structure
 from pymatgen.entries.computed_entries import ComputedStructureEntry
@@ -179,13 +178,16 @@ def split_relax_output(wch, n_main):
         (refs if idx >= n_main else main).append(entry)
     return main, refs
 
-def unique_low_energy_chemsys(chemical_system, entries, ehull, element_entries=None):
+def unique_low_energy_chemsys(chemical_system, entries, ehull, min_n_return=None, element_entries=None):
     """Select the unique lowest-energy structures for a given chemical system.
 
     ``element_entries`` are the elemental hull endpoints to add. Pass the
     on-method MLIP references (``element_reference_entries``); when ``None`` the
     bundled DFT references are used (``DFT_FUNC`` selects GGA/r2SCAN) -- legacy
     behaviour, kept for backward compatibility.
+
+    ``min_n_return``: if fewer than this many unique structures are within
+    ``ehull``, pad with the next-lowest unique ones above it.
     """
     entries = list(entries)
     if "-" in chemical_system:
@@ -194,14 +196,18 @@ def unique_low_energy_chemsys(chemical_system, entries, ehull, element_entries=N
                        else get_element_entries(elements, DFT_FUNC))
     pd = PhaseDiagram(entries)
 
+    # sorted by e_above_hull so each duplicate group keeps its lowest-energy
+    # copy and padding (min_n_return) takes the next most stable structures
+    candidates = [(entry, pd.get_e_above_hull(entry)) for entry in pd.entries
+                  if entry.composition.chemical_system == chemical_system]
+    candidates.sort(key=lambda x: x[1])
+
     stable_entries = []
     existing_structs = []
 
-    for entry in pd.entries:
-        if entry.composition.chemical_system != chemical_system:
-            continue
-        if pd.get_e_above_hull(entry) > ehull:
-            continue
+    for entry, eh in candidates:
+        if eh > ehull and len(stable_entries) >= (min_n_return or 0):
+            break
 
         prim_struct = get_primitive_cell(entry.structure.as_dict())
 
@@ -235,17 +241,6 @@ def unique_low_energy_comp(chemical_formula, entries, ehull, min_n_return=None, 
 
     for en in pd.entries:
         if en.composition.reduced_formula != chemical_formula:
-            continue
-
-        # adding the structure filter sanity checks here because this is where they all have to pass  -- janK
-        garbage = False
-        entry_structure = en.structure
-        for vec in entry_structure.lattice.matrix:
-            if np.any([np.abs(v) > 100 for v in vec]):
-                garbage = True
-        if garbage:
-            print('threw out garbage')
-            print(entry_structure)
             continue
 
         prim_struct = get_primitive_cell(en.structure.as_dict())

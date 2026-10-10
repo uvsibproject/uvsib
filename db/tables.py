@@ -124,42 +124,42 @@ class DBSurfaceMLAdsorbate(Base):
     ctime = Column(DateTime(timezone=True), server_default=func.now())
     mtime = Column(DateTime(timezone=True), onupdate=func.now())
 
-class DBAkmcEvent(Base):
-    """One dimer-search event discovered while running AKMCWorkChain on a
-    DBSurfaceMLAdsorbate minimum. One row per event (not one blob per source
-    row), so barrier/rate/kmc_selected are indexable SQL columns instead of
-    JSONB buried in an unrelated row's attributes."""
-    __tablename__ = "db_akmc_event"
-
-    id = Column(Integer, primary_key=True)
-    source_row_id = Column(Integer, ForeignKey("db_surface_ml_adsorbate.id", ondelete="CASCADE"), nullable=False)
-    composition = Column(String, nullable=True)
-    reaction = Column(String, nullable=True)
-    reaction_path = Column(String, nullable=True)
-    source_adsorbate = Column(String, nullable=True)
-    source_site_type = Column(String, nullable=True)
-    source_eta = Column(DOUBLE_PRECISION, nullable=True)
-    attempt = Column(Integer, nullable=False)
-    initial_energy = Column(DOUBLE_PRECISION, nullable=False)
-    saddle_energy = Column(DOUBLE_PRECISION, nullable=False)
-    final_energy = Column(DOUBLE_PRECISION, nullable=False)
-    barrier = Column(DOUBLE_PRECISION, nullable=False)
-    reverse_barrier = Column(DOUBLE_PRECISION, nullable=False)
-    rate = Column(DOUBLE_PRECISION, nullable=False)
-    temperature = Column(DOUBLE_PRECISION, nullable=False)
-    prefactor = Column(DOUBLE_PRECISION, nullable=False)
-    seed = Column(Integer, nullable=True)
-    kmc_selected = Column(Boolean, nullable=False, default=False)
-    kmc_time_increment = Column(DOUBLE_PRECISION, nullable=True)
-    final_state_key = Column(JSONB, nullable=True)
-    initial_atoms_json = Column(Text, nullable=False)
-    saddle_atoms_json = Column(Text, nullable=False)
-    final_atoms_json = Column(Text, nullable=False)
-    attributes = Column(JSONB, nullable=True)
-    ctime = Column(DateTime(timezone=True), server_default=func.now())
-
-    def __repr__(self):
-        return f"<DBAkmcEvent(id={self.id}, source_row_id={self.source_row_id}, barrier={self.barrier})>"
+#class DBAkmcEvent(Base):
+#    """One dimer-search event discovered while running AKMCWorkChain on a
+#    DBSurfaceMLAdsorbate minimum. One row per event (not one blob per source
+#    row), so barrier/rate/kmc_selected are indexable SQL columns instead of
+#    JSONB buried in an unrelated row's attributes."""
+#    __tablename__ = "db_akmc_event"
+#
+#    id = Column(Integer, primary_key=True)
+#    source_row_id = Column(Integer, ForeignKey("db_surface_ml_adsorbate.id", ondelete="CASCADE"), nullable=False)
+#    composition = Column(String, nullable=True)
+#    reaction = Column(String, nullable=True)
+#    reaction_path = Column(String, nullable=True)
+#    source_adsorbate = Column(String, nullable=True)
+#    source_site_type = Column(String, nullable=True)
+#    source_eta = Column(DOUBLE_PRECISION, nullable=True)
+#    attempt = Column(Integer, nullable=False)
+#    initial_energy = Column(DOUBLE_PRECISION, nullable=False)
+#    saddle_energy = Column(DOUBLE_PRECISION, nullable=False)
+#    final_energy = Column(DOUBLE_PRECISION, nullable=False)
+#    barrier = Column(DOUBLE_PRECISION, nullable=False)
+#    reverse_barrier = Column(DOUBLE_PRECISION, nullable=False)
+#    rate = Column(DOUBLE_PRECISION, nullable=False)
+#    temperature = Column(DOUBLE_PRECISION, nullable=False)
+#    prefactor = Column(DOUBLE_PRECISION, nullable=False)
+#    seed = Column(Integer, nullable=True)
+#    kmc_selected = Column(Boolean, nullable=False, default=False)
+#    kmc_time_increment = Column(DOUBLE_PRECISION, nullable=True)
+#    final_state_key = Column(JSONB, nullable=True)
+#    initial_atoms_json = Column(Text, nullable=False)
+#    saddle_atoms_json = Column(Text, nullable=False)
+#    final_atoms_json = Column(Text, nullable=False)
+#    attributes = Column(JSONB, nullable=True)
+#    ctime = Column(DateTime(timezone=True), server_default=func.now())
+#
+#    def __repr__(self):
+#        return f"<DBAkmcEvent(id={self.id}, source_row_id={self.source_row_id}, barrier={self.barrier})>"
 
 class DBFrontend(Base):
     """Frontend table"""

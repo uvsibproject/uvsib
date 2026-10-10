@@ -93,10 +93,6 @@ class PhaseDiagramMLWorkChain(WorkChain):
                 cls.uncertainty,
                 cls.inspect_uncertainty
             ),
-            if_(cls.should_run_optical_screen)(
-                cls.optical_screen,
-                cls.inspect_optical_screen
-            ),
             if_(cls.should_run_synthesizability)(
                 cls.synthesizability,
                 cls.inspect_synthesizability
@@ -108,7 +104,6 @@ class PhaseDiagramMLWorkChain(WorkChain):
         spec.exit_code(301, "ERROR_NO_STRUCTURES_FOUND", message="No stable structures were found")
         spec.exit_code(302, "ERROR_NO_CHEMSYS_FOUND", message="Chemical system does not exist in DBChemsys")
         spec.exit_code(303, "ERROR_NO_COMPOSITION_FOUND", message="Chemical formula does not exist in DBComposition")
-        spec.exit_code(304, "ERROR_OPTICAL_SCREEN_FAILED", message="OpticalScreenWorkChain did not finish successfully")
         spec.exit_code(305, "ERROR_SYNTHESIZABILITY_FAILED", message="SynthesizabilityScreenWorkChain did not finish successfully")
 
     def setup(self):
@@ -347,36 +342,6 @@ class PhaseDiagramMLWorkChain(WorkChain):
             return
         self.report("EhullUncertaintyWorkChain finished; ml_uncertainty written for the ML bulk selection.")
 
-    def should_run_optical_screen(self):
-        """Run the no-DFT light-harvesting screen (OpticalScreenWorkChain) on
-        the ML bulk selection. On by default (``settings.OPTICAL_SCREEN_ENABLED``);
-        skipped if there is nothing selected to screen."""
-        if not settings.OPTICAL_SCREEN_ENABLED:
-            return False
-        rows = query_by_columns(DBComposition, {"composition": self.ctx.chemical_formula})
-        if not rows or not (rows[0].stable_struct or {}).get("ml_uuid_list"):
-            self.report("Optical screen: no ML bulk selection to screen; skipping.")
-            return False
-        return True
-
-    def optical_screen(self):
-        """Submit OpticalScreenWorkChain for the ML bulk selection."""
-        try:
-            builder = self._construct_optical_screen_builder()
-            future = self.submit(builder)
-        except Exception as exc:  # e.g. the `Electronic` code is not configured
-            self.report(f"Optical screen: cannot submit OpticalScreenWorkChain ({exc}).")
-            return self.exit_codes.ERROR_OPTICAL_SCREEN_FAILED
-        self.to_context(**{"optical_screen": future})
-
-    def inspect_optical_screen(self):
-        """Mandatory stage: fail the phase diagram if the light screen fails."""
-        wch = self.ctx.optical_screen
-        if not wch.is_finished_ok:
-            self.report(f"OpticalScreenWorkChain did not finish OK (exit {wch.exit_status}).")
-            return self.exit_codes.ERROR_OPTICAL_SCREEN_FAILED
-        self.report("OpticalScreenWorkChain finished; band_info written for the ML bulk selection.")
-
     def should_run_synthesizability(self):
         """Run the CSLLM synthesizability screen (SynthesizabilityScreenWorkChain)
         on the ML bulk selection. On by default (``settings.SYNTHESIZABILITY_ENABLED``);
@@ -443,13 +408,6 @@ class PhaseDiagramMLWorkChain(WorkChain):
         builder = Workflow.get_builder()
         builder.chemical_formula = Str(self.ctx.chemical_formula)
         builder.ml_bulk_model = Str(self.ctx.ml_bulk_model)
-        return builder
-
-    def _construct_optical_screen_builder(self):
-        """OpticalScreenWorkChain builder (no-DFT light-harvesting screen)."""
-        Workflow = WorkflowFactory("opticalscreen")
-        builder = Workflow.get_builder()
-        builder.chemical_formula = Str(self.ctx.chemical_formula)
         return builder
 
     def _construct_synthesizability_builder(self):
