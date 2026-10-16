@@ -135,8 +135,7 @@ def get_structures_from_mpdb_by_composition(chemical_formula, e_hull=0.1):
         "fields": ["material_id", "structure", "energy_above_hull", "theoretical"],
     }
 
-    with MPRester(api_key) as mpr:
-        mpr.materials.summary.use_document_model = False
+    with MPRester(api_key, use_document_model=False) as mpr:
         summaries = mpr.materials.summary.search(**search_kwargs)
 
     if not summaries:

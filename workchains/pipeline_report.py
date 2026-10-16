@@ -966,7 +966,7 @@ _METHOD_LABELS = {
 
 
 def _precursor_check(top, esc):
-    """&#10003; / &#9888; marker for the top-ranked precursor set."""
+    """&#10003; / &#9888;&#xFE0E; marker for the top-ranked precursor set."""
     if top.get("element_consistent"):
         return ('<span class="ml-1 text-green-600" title="every target element is '
                 'supplied; no non-volatile foreign elements">&#10003;</span>')
@@ -977,7 +977,7 @@ def _precursor_check(top, esc):
         why.append("foreign " + ", ".join(top["extra_elements"]))
     if top.get("unparsable"):
         why.append("unparsable " + ", ".join(top["unparsable"]))
-    return f'<span class="ml-1 text-red-600" title="{esc("; ".join(why))}">&#9888;</span>'
+    return f'<span class="ml-1 text-red-600" title="{esc("; ".join(why))}">&#9888;&#xFE0E;</span>'
 
 
 def _method_cell(p, esc):
@@ -1197,7 +1197,7 @@ def _synthesizability_section(summaries, esc):
               </p>
               <p class="text-xs text-slate-500">
                 Advisory only &mdash; no structure is removed on this basis. Precursor sets are
-                element-checked against the target (&#10003; / &#9888;), not stoichiometry-balanced;
+                element-checked against the target (&#10003; / &#9888;&#xFE0E;), not stoichiometry-balanced;
                 CSLLM's precursor model was validated on binary/ternary compounds, so larger systems
                 are marked out of domain.
               </p>
@@ -1222,17 +1222,17 @@ _STABILITY_BADGES = {
                   "the models disagree on whether E_hull is below the threshold"),
     "unstable": ("bg-red-100 text-red-700", "unstable",
                  "E_hull above the threshold for every model"),
-    "geometry_disagreement": ("bg-purple-100 text-purple-700", "geometry",
+    "geometry_disagreement": ("bg-purple-100 text-purple-700", "relaxation",
                               "relaxing on a committee model could shift its E_hull by as much "
                               "as the model spread -- the spread is not trusted on its own"),
 }
 
-_GEOMETRY_SOURCE_TEXT = {"self": "geometry (self)", "competing": "geometry (competing phase)"}
+_RELAX_SOURCE_TEXT = {"self": "relaxation (self)", "competing": "relaxation (competing phase)"}
 
 
-def _geometry_via_text(unc):
+def _relax_via_text(unc):
     """``"via 3cc347b8 (GRACE)"`` / ``"self (GRACE)"`` for the structure that
-    dominates the geometry shift; ``""`` if unknown."""
+    dominates the relaxation sensitivity; ``""`` if unknown."""
     via = unc.get("geometry_via")
     if not via:
         return ""
@@ -1241,20 +1241,54 @@ def _geometry_via_text(unc):
     return f'via {via["uuid"][:8]} ({via["model"]})'
 
 
-def _geometry_title(unc):
-    """Tooltip: the shift bound, the limit and every contributing structure."""
-    shift, limit = unc.get("geometry_shift_max"), unc.get("geometry_limit")
-    if shift is None:
+def _mev(value, digits=1):
+    return _fmt(None if value is None else 1000 * value, digits)
+
+
+def _relax_title(unc):
+    """Tooltip: the relaxation sensitivity (force + stress) of every committee
+    model, the limit and every contributing structure."""
+    total, limit = unc.get("geometry_shift_max"), unc.get("geometry_limit")
+    if total is None:
         return ""
-    lines = [f"possible E_hull shift {1000 * shift:.1f} meV/atom "
+    lines = [f"relaxation sensitivity {1000 * total:.1f} meV/atom "
              f"(limit {1000 * limit:.1f} = max(spread, floor))"
              f" under {unc.get('geometry_shift_model')}"]
+    forces, stresses = unc.get("geometry_shift_force") or {}, unc.get("geometry_shift_stress") or {}
+    for m, t in (unc.get("geometry_shift") or {}).items():
+        lines.append(f"  {m}: force {_mev(forces.get(m))} + stress {_mev(stresses.get(m))} "
+                     f"= {1000 * t:.1f} meV/atom")
     for c in unc.get("geometry_culprits") or []:
         lines.append(f'{"self" if c.get("self") else "competing"} {c["uuid"][:8]}: '
-                     f'{1000 * c["shift"]:.1f} meV/atom (relax {1000 * c["relax_energy"]:.1f} '
-                     f'x {c["fraction"]:.2f}); F={_fmt(c.get("max_force"), 2)} eV/A, '
+                     f'{1000 * c["shift"]:.1f} meV/atom = force {_mev(c.get("shift_force"))} '
+                     f'+ stress {_mev(c.get("shift_stress"))} (x {c["fraction"]:.2f}); '
+                     f'F={_fmt(c.get("max_force"), 2)} eV/A, '
                      f'stress={_fmt(c.get("max_stress"), 2)} GPa, P={_fmt(c.get("pressure"), 2)} GPa')
     return "\n".join(lines)
+
+
+def _relax_cells(unc, esc):
+    """``(dE_force, dE_stress, dE_total / limit)`` cells of one bulk row; on a
+    flagged bulk the larger part is highlighted."""
+    total = unc.get("geometry_shift_max")
+    if total is None:
+        return ['<td class="px-4 py-3">&mdash;</td>'] * 3
+    flagged = unc.get("geometry_disagreement")
+    title = esc(_relax_title(unc))
+    force, stress = unc.get("geometry_shift_force_max"), unc.get("geometry_shift_stress_max")
+    big = None
+    if flagged and force is not None and stress is not None:
+        big = "force" if force >= stress else "stress"
+    cells = [f'<td class="px-4 py-3{" font-semibold text-purple-700" if big == name else ""}">'
+             f'<span title="{title}">{_mev(value)}</span></td>'
+             for name, value in (("force", force), ("stress", stress))]
+    via = _relax_via_text(unc)
+    via_bit = (f'<br><span class="text-xs font-normal text-slate-500">{esc(via)}</span>'
+               if via and flagged else "")
+    css = " bg-purple-50 text-purple-700 font-semibold" if flagged else ""
+    cells.append(f'<td class="px-4 py-3{css}"><span title="{title}">{1000 * total:.1f} / '
+                 f'{1000 * unc["geometry_limit"]:.1f}</span>{via_bit}</td>')
+    return cells
 
 
 def _uncertainty_methods(meta):
@@ -1269,8 +1303,8 @@ def _stability_badge(unc, esc):
     css, text, title = _STABILITY_BADGES.get(unc.get("label"), ("bg-slate-100 text-slate-600",
                                                                unc.get("label"), ""))
     if unc.get("label") == "geometry_disagreement":
-        text = _GEOMETRY_SOURCE_TEXT.get(unc.get("geometry_source"), text)
-        detail = _geometry_title(unc)
+        text = _RELAX_SOURCE_TEXT.get(unc.get("geometry_source"), text)
+        detail = _relax_title(unc)
         if detail:
             title += "\n" + detail
     return (f'<span class="px-2 py-0.5 rounded {css} text-xs font-bold" '
@@ -1308,7 +1342,7 @@ def _uncertainty_section(summaries, esc):
     floor = meta.get("relax_energy_floor")
 
     head_cells = "".join(
-        f'<th class="px-4 py-3"><span class="normal-case">{esc(m)}{"*" if m == primary else ""}</span></th>'
+        f'<th rowspan="2" class="px-4 py-3 align-bottom"><span class="normal-case">{esc(m)}{"*" if m == primary else ""}</span></th>'
         for m in methods)
     rows = []
     for s in with_unc:
@@ -1322,25 +1356,14 @@ def _uncertainty_section(summaries, esc):
                 continue
             ed_bit = f' <span class="text-slate-400">({ed:.3f})</span>' if ed is not None and ed < 0 else ""
             model_cells.append(f'<td class="px-4 py-3">{ehull:.3f}{ed_bit}</td>')
-        shift = unc.get("geometry_shift_max")
-        geo_css = ' bg-purple-50 text-purple-700 font-semibold' if unc.get("geometry_disagreement") else ""
-        if shift is None:
-            geo_cell = "&mdash;"
-        else:
-            via = _geometry_via_text(unc)
-            via_bit = (f'<br><span class="text-xs font-normal text-slate-500">{esc(via)}</span>'
-                       if via and unc.get("geometry_disagreement") else "")
-            geo_cell = (f'<span title="{esc(_geometry_title(unc))}">{1000 * shift:.1f} / '
-                        f'{1000 * unc["geometry_limit"]:.1f}</span>{via_bit}')
         rows.append(f"""
                   <tr class="border-t">
                     <td class="px-4 py-3 font-mono text-xs" title="{esc(s['structure_uuid'])}">{esc(s['structure_uuid'][:8])}</td>
                     {"".join(model_cells)}
-                    <td class="px-4 py-3">{unc['ehull_min']:.3f}&ndash;{unc['ehull_max']:.3f}</td>
                     <td class="px-4 py-3">{unc['ed_std']:.3f}</td>
                     <td class="px-4 py-3">{unc['bias_primary']:+.3f}</td>
                     <td class="px-4 py-3">{unc['stable_votes']}/{unc['n_models']}</td>
-                    <td class="px-4 py-3{geo_css}">{geo_cell}</td>
+                    {"".join(_relax_cells(unc, esc))}
                     <td class="px-4 py-3">{_stability_badge(unc, esc)}</td>
                   </tr>""")
 
@@ -1380,20 +1403,25 @@ def _uncertainty_section(summaries, esc):
                 <strong>Votes</strong> = models with E<sub>hull</sub> &le; {_fmt(meta.get('ehull_threshold'), 2)}.
               </p>
               <p>
-                <strong>Geometry shift / limit</strong> (meV/atom): the committee single points are not
+                <strong>Relaxation sensitivity</strong> (meV/atom): the committee single points are not
                 taken at each model's own minimum. From the single-point forces and the
                 <em>deviatoric</em> stress (a uniform pressure is a systematic lattice offset that largely
                 cancels in E<sub>hull</sub>) the energy each committee model would gain by relaxing is
                 estimated harmonically, for the bulk and for every phase it is compared against on that
-                model's hull:
+                model's hull. It is an estimated energy correction, not a displacement of the atoms, and
+                is split into two parts:
               </p>
               <div class="bg-white border rounded-lg px-4 py-3 font-mono text-xs leading-6 overflow-x-auto">
-                &Delta;E<sub>relax</sub>(s, m) = &lang;|F<sub>i</sub>|<sup>2</sup>&rang; / (2k)
-                  + V<sub>atom</sub> &middot; |&sigma;<sub>dev</sub>|<sup>2</sup> / (4G)<br>
-                &delta;<sub>m</sub> = &Delta;E<sub>relax</sub>(bulk, m)
-                  + &Sigma;<sub>j</sub> x<sub>j</sub> &middot; &Delta;E<sub>relax</sub>(j, m)<br>
-                Geometry shift = max<sub>m</sub> &delta;<sub>m</sub>
-                &nbsp;&nbsp;&nbsp; limit = max(&sigma;(&Delta;E<sub>d</sub>),
+                &Delta;E<sub>force</sub>(s, m) = &lang;|F<sub>i</sub>|<sup>2</sup>&rang; / (2k)
+                &nbsp;&nbsp;&nbsp; &Delta;E<sub>stress</sub>(s, m) = V<sub>atom</sub> &middot; |&sigma;<sub>dev</sub>|<sup>2</sup> / (4G)<br>
+                &delta;<sup>X</sup><sub>m</sub> = &Delta;E<sub>X</sub>(bulk, m)
+                  + &Sigma;<sub>j</sub> x<sub>j</sub> &middot; &Delta;E<sub>X</sub>(j, m)
+                  &nbsp;&nbsp;&nbsp; X &isin; {{force, stress}}, &nbsp; &delta;<sub>m</sub> = &delta;<sup>force</sup><sub>m</sub> + &delta;<sup>stress</sup><sub>m</sub><br>
+                m* = argmax<sub>m</sub> &delta;<sub>m</sub>:
+                &nbsp; &Delta;E<sub>force</sub> = &delta;<sup>force</sup><sub>m*</sub>,
+                &nbsp; &Delta;E<sub>stress</sub> = &delta;<sup>stress</sup><sub>m*</sub>,
+                &nbsp; &Delta;E<sub>total</sub> = &Delta;E<sub>force</sub> + &Delta;E<sub>stress</sub><br>
+                limit = max(&sigma;(&Delta;E<sub>d</sub>),
                 {_fmt(1000 * floor if floor is not None else None, 1)} meV/atom)
               </div>
               <p class="text-xs text-slate-600">
@@ -1405,12 +1433,17 @@ def _uncertainty_section(summaries, esc):
                 compared against on model m's hull (its decomposition products, or the next-best competitor for a
                 hull phase) with atom fractions x<sub>j</sub>;
                 k = {_fmt(meta.get('force_constant'), 1)} eV/&Aring;<sup>2</sup> (effective force constant),
-                G = {_fmt(meta.get('shear_modulus'), 0)} GPa (shear modulus).
+                G = {_fmt(meta.get('shear_modulus'), 0)} GPa (shear modulus). Both parts are taken from the same
+                model m*, so they add up to &Delta;E<sub>total</sub>; the other models' split is in the tooltip.
               </p>
               <p>
-                A bulk whose shift exceeds the limit is labelled <em>geometry (self)</em> when its own
-                geometry dominates &delta;<sub>m</sub>, or <em>geometry (competing phase)</em> when a phase it
-                is compared against does (named under the value; it need not be one of the bulks listed here).
+                A large <strong>&Delta;E<sub>force</sub></strong> points to residual forces on the atoms
+                (internal coordinates not relaxed); a large <strong>&Delta;E<sub>stress</sub></strong> points to
+                an imperfectly relaxed cell shape. A bulk whose &Delta;E<sub>total</sub> exceeds the limit is
+                labelled <em>relaxation (self)</em> when its own structure dominates &delta;<sub>m*</sub>, or
+                <em>relaxation (competing phase)</em> when a phase it is compared against does (named under the
+                value; it need not be one of the bulks listed here). On a flagged bulk the larger of the two parts
+                is highlighted.
               </p>
               {notes_html}
               <p class="text-xs text-slate-500">
@@ -1422,14 +1455,18 @@ def _uncertainty_section(summaries, esc):
               <table class="w-full text-sm text-left text-slate-700">
                 <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
                   <tr>
-                    <th class="px-4 py-3">Bulk</th>
+                    <th rowspan="2" class="px-4 py-3 align-bottom">Bulk</th>
                     {head_cells}
-                    <th class="px-4 py-3">Range</th>
-                    <th class="px-4 py-3"><span class="normal-case">&sigma;(&Delta;E<sub>d</sub>)</span></th>
-                    <th class="px-4 py-3">Bias</th>
-                    <th class="px-4 py-3">Votes</th>
-                    <th class="px-4 py-3">Geometry shift / limit (meV/atom)</th>
-                    <th class="px-4 py-3">Label</th>
+                    <th rowspan="2" class="px-4 py-3 align-bottom"><span class="normal-case">&sigma;(&Delta;E<sub>d</sub>)</span></th>
+                    <th rowspan="2" class="px-4 py-3 align-bottom">Bias</th>
+                    <th rowspan="2" class="px-4 py-3 align-bottom">Votes</th>
+                    <th colspan="3" class="px-4 pt-3 pb-1 text-center border-b border-slate-200">Relaxation sensitivity (meV/atom)</th>
+                    <th rowspan="2" class="px-4 py-3 align-bottom">Label</th>
+                  </tr>
+                  <tr>
+                    <th class="px-4 pt-1 pb-3">&Delta;E<sub>force</sub></th>
+                    <th class="px-4 pt-1 pb-3">&Delta;E<sub>stress</sub></th>
+                    <th class="px-4 pt-1 pb-3">&Delta;E<sub>total</sub> / limit</th>
                   </tr>
                 </thead>
                 <tbody>{"".join(rows)}</tbody>
@@ -1439,38 +1476,89 @@ def _uncertainty_section(summaries, esc):
         </section>"""
 
 
-_COMMITTEE_GEOMETRY_TEXT = {"slab": "geometry (slab)", "bulk": "geometry (bulk)",
-                            "adsorbate": "geometry (adsorbate)", "gas": "geometry (gas)"}
-_COMMITTEE_LABEL_TITLES = {
-    "surface": {"robust": "same facet rank within the bulk under every MLIP",
-                "uncertain": "the MLIPs rank this facet differently within the bulk"},
-    "adsorption": {"robust": "std(eta) within the tolerance and the same potential-determining "
-                             "step under every MLIP",
-                   "uncertain": "std(eta) above the tolerance or the potential-determining step "
-                                "differs between MLIPs"},
-}
+_GREEN_CHIP = "bg-green-100 text-green-700"
+_AMBER_CHIP = "bg-amber-100 text-amber-700"
+_PURPLE_CHIP = "bg-purple-100 text-purple-700"
+_SLATE_CHIP = "bg-slate-100 text-slate-600"
+_GEOMETRY_SOURCE_NAMES = {"slab": "slab", "bulk": "bulk", "adsorbate": "adsorbate", "gas": "gas reference"}
 
 
-def _committee_badge(unc, esc, kind):
-    """Label badge of a surface (``kind="surface"``) or reaction candidate
-    (``kind="adsorption"``) committee analysis; ``""`` if none."""
-    if not unc or not unc.get("label"):
+def _chip(css, text, title, esc):
+    return (f'<span class="inline-block whitespace-nowrap px-2 py-0.5 rounded {css} text-xs '
+            f'font-semibold" title="{esc(title)}">{text}</span>')
+
+
+def _yes_no(ok, title=None, esc=None):
+    css, text = ("text-green-700", "yes") if ok else ("text-amber-700", "no")
+    attr = f' title="{esc(title)}"' if title and esc else ""
+    return f'<span class="{css} font-semibold"{attr}>{text}</span>'
+
+
+def _geometry_chip(unc, esc, kind):
+    """Geometry-sensitivity chip of a facet (``kind="surface"``) or reaction
+    candidate (``kind="adsorption"``): a heuristic from the committee models'
+    residual forces on the primary's geometries; ``""`` if not computed."""
+    if not unc or unc.get("geometry_shift_max") is None:
         return ""
-    label = unc["label"]
-    css, text, title = _STABILITY_BADGES.get(label, ("bg-slate-100 text-slate-600", label, ""))
-    if label == "geometry_disagreement":
-        text = _COMMITTEE_GEOMETRY_TEXT.get(unc.get("geometry_source"), "geometry")
-        unit, scale = ("eV/Å²", 1.0) if kind == "surface" else ("V", 1.0)
-        title = (f"relaxing on {unc.get('geometry_shift_model')} could shift the value by up to "
-                 f"{unc['geometry_shift_max'] * scale:.4g} {unit} "
-                 f"(limit {unc['geometry_limit'] * scale:.4g} {unit} = max(spread, floor))")
+    title = _geometry_title(unc, kind)
+    if unc.get("geometry_disagreement"):
+        source = _GEOMETRY_SOURCE_NAMES.get(unc.get("geometry_source"), "")
+        return _chip(_PURPLE_CHIP, "geometry: sensitive" + (f" ({source})" if source else ""), title, esc)
+    return _chip(_SLATE_CHIP, "geometry: low", title, esc)
+
+
+def _geometry_title(unc, kind):
+    """Tooltip of the geometry heuristic: estimate, limit and dominant structure."""
+    unit, digits = ("eV/Å²", 4) if kind == "surface" else ("V", 3)
+    shift, limit = unc["geometry_shift_max"], unc.get("geometry_limit") or 0.0
+    title = (f"Heuristic indicator, not a predicted relaxation energy: the residual forces under "
+             f"{unc.get('geometry_shift_model')} on the primary-relaxed geometries correspond to a "
+             f"harmonic estimate of {shift:.{digits}f} {unit}, compared with "
+             f"max(model spread, floor) = {limit:.{digits}f} {unit}.")
+    if unc.get("geometry_disagreement"):
         via = _committee_via_text(unc, kind)
         if via:
-            title += f"; dominated by {via}"
-    else:
-        title = _COMMITTEE_LABEL_TITLES[kind].get(label, title)
-    return (f'<span class="px-2 py-0.5 rounded {css} text-xs font-bold" '
-            f'title="{esc(title)}">{esc(text)}</span>')
+            title += f" Dominated by {via}."
+        title += " The model spread alone may not reflect the disagreement after relaxation."
+    return title
+
+
+def _geometry_warning(titles, esc):
+    """Purple warning marker placed next to a spread whose geometry heuristic
+    is flagged; ``""`` when nothing is flagged."""
+    if not titles:
+        return ""
+    return (f' <span class="text-purple-700 font-bold cursor-help" '
+            f'title="{esc("Geometry sensitive -- " + chr(10).join(titles))}">&#9888;&#xFE0E;</span>')
+
+
+def _rank_chip(unc, esc, methods):
+    """Facet-rank agreement chip (detailed surface table)."""
+    ranks = " / ".join(f"{m} {unc['rank'].get(m, '?')}" for m in methods)
+    if unc.get("rank_agree"):
+        return _chip(_GREEN_CHIP, "rank: same", f"same facet rank within the bulk under every MLIP ({ranks})", esc)
+    return _chip(_AMBER_CHIP, "rank: differs", f"the MLIPs rank this facet differently within the bulk ({ranks})", esc)
+
+
+def _pds_title(unc, methods):
+    return "potential-determining step: " + " / ".join(
+        f"{m} step {unc['pds'][m] + 1}" if unc["pds"].get(m) is not None else f"{m} ?" for m in methods)
+
+
+def _energetic_chips(unc, esc, methods):
+    """sigma_eta-tolerance and potential-determining-step chips of a candidate."""
+    tol = (unc.get("meta") or {}).get("eta_tolerance")
+    chips = []
+    if tol is not None:
+        ok = unc["eta_std"] <= tol + 1e-12
+        chips.append(_chip(_GREEN_CHIP if ok else _AMBER_CHIP,
+                           f"&sigma;<sub>&eta;</sub> {'&le;' if ok else '&gt;'} {tol:.2f} V",
+                           f"spread of eta over all MLIPs: {unc['eta_std']:.3f} V (tolerance {tol:.2f} V)", esc))
+    if unc.get("pds"):
+        ok = len(set(unc["pds"].values())) == 1
+        chips.append(_chip(_GREEN_CHIP if ok else _AMBER_CHIP, "PDS: same" if ok else "PDS: differs",
+                           _pds_title(unc, methods), esc))
+    return chips
 
 
 def _committee_via_text(unc, kind):
@@ -1505,20 +1593,20 @@ def _gamma_cell(surf, meta, esc):
 
 
 def _eta_cell(best, esc):
-    """Best-eta cell: primary eta, &plusmn; std over all MLIPs, label badge."""
+    """Best-eta cell: primary eta, &plusmn; std over all MLIPs, and the three
+    separate checks (sigma_eta tolerance, potential-determining step, geometry)."""
     if not best:
         return "&mdash;"
     unc = best.get("uncertainty")
     if not unc:
         return f'{best["eta"]:.3f} V'
     meta = unc.get("meta") or {}
-    per_model = " · ".join(f'{m} {unc["eta"][m]:.3f}' for m in _committee_methods(unc, meta)) if meta else ""
-    via = ""
-    if unc.get("geometry_disagreement"):
-        via = (f'<br><span class="text-xs text-slate-500">via '
-               f'{esc(_committee_via_text(unc, "adsorption"))}</span>')
-    return (f'<span title="{esc(per_model + " (V)")}">{best["eta"]:.3f} &plusmn; {unc["eta_std"]:.3f} V</span>'
-            f'<br>{_committee_badge(unc, esc, "adsorption")}{via}')
+    methods = _committee_methods(unc, meta) if meta else list(unc["eta"])
+    per_model = " · ".join(f'{m} {unc["eta"][m]:.3f}' for m in methods)
+    chips = _energetic_chips(unc, esc, methods) + [_geometry_chip(unc, esc, "adsorption")]
+    return (f'<span class="whitespace-nowrap" title="{esc(per_model + " (V)")}">{best["eta"]:.3f} &plusmn; '
+            f'{unc["eta_std"]:.3f} V</span>'
+            f'<div class="flex flex-wrap gap-1 mt-1">{"".join(c for c in chips if c)}</div>')
 
 
 def _surface_name(summary, surface_id):
@@ -1530,11 +1618,16 @@ def _surface_name(summary, surface_id):
 
 
 def _candidate_name(summary, row_id):
+    """Full identity of an adsorption candidate -- the unit the best-candidate
+    agreement compares: ``"#15 · surface 1 (1, 0, 0) · ontop · 0.5 ML"``."""
     for c in summary["reaction_candidates"]:
         if str(c["row_id"]) == str(row_id):
             miller = tuple(c["miller_index"]) if c["miller_index"] else "?"
-            return f"{miller} {c['site_type']}"
-    return str(row_id)
+            bits = [f"#{row_id}", f"surface {c['surface_id']} {miller}", c["site_type"]]
+            if c.get("coverage") is not None:
+                bits.append(f"{c['coverage']:g} ML")
+            return " · ".join(bits)
+    return f"#{row_id}"
 
 
 def _agreement_bit(agree, picks, primary, name_fn):
@@ -1548,7 +1641,8 @@ def _agreement_bit(agree, picks, primary, name_fn):
 
 def _committee_note(summary, esc):
     """One line under a bulk's surfaces table: does the committee agree on the
-    lowest-gamma facet, the facets carried to adsorption and the best candidate?"""
+    lowest-gamma facet, the facets carried to adsorption and the best candidate,
+    and how far apart are the models on gamma?"""
     bits = []
     surf_bulk, surf_meta = summary.get("surface_uncertainty"), summary.get("surface_uncertainty_meta")
     if surf_bulk and surf_meta:
@@ -1558,10 +1652,13 @@ def _committee_note(summary, esc):
         bits.append(f"Facets carried to adsorption (lowest {surf_meta.get('n_selected')}): " + (
             '<span class="text-green-700 font-semibold">same under all MLIPs</span>'
             if surf_bulk["selected_agree"] else '<span class="text-amber-700 font-semibold">differ</span>'))
+        gammas = [surf["uncertainty"]["gamma_std"] for surf in summary["surfaces"] if surf.get("uncertainty")]
+        if gammas:
+            bits.append(f"&sigma;<sub>&gamma;</sub> over facets: {min(gammas):.4f}&ndash;{max(gammas):.4f} eV/&Aring;&sup2;")
     ads_bulk, ads_meta = summary.get("adsorption_uncertainty"), summary.get("adsorption_uncertainty_meta")
     if ads_bulk and ads_meta:
         name = lambda rid: esc(_candidate_name(summary, rid))
-        bits.append("Best candidate: " + _agreement_bit(
+        bits.append("Best adsorption candidate: " + _agreement_bit(
             ads_bulk["best_agree"], ads_bulk["best"], ads_meta["primary"], name))
     if not bits:
         return ""
@@ -1570,66 +1667,87 @@ def _committee_note(summary, esc):
 
 
 def _surface_adsorption_section(summaries, esc):
-    """"Surface &amp; Adsorption Uncertainty" section: one row per bulk with the
-    committee agreement on facets and on the best reaction candidate. ``""``
-    when neither analysis ran."""
+    """"Surface &amp; Adsorption Uncertainty" section: one row per bulk, with
+    ranking stability, energetic agreement and geometry sensitivity reported as
+    separate columns (no combined label). ``""`` when neither analysis ran."""
     rows_with = [s for s in summaries if s.get("surface_uncertainty") or s.get("adsorption_uncertainty")]
     if not rows_with:
         return ""
     surf_meta = next((s["surface_uncertainty_meta"] for s in summaries if s.get("surface_uncertainty_meta")), None)
     ads_meta = next((s["adsorption_uncertainty_meta"] for s in summaries if s.get("adsorption_uncertainty_meta")), None)
+    meta = surf_meta or ads_meta
+    primary = meta["primary"]
+    eta_tol = ads_meta.get("eta_tolerance") if ads_meta else None
+    dash = "&mdash;"
 
     rows = []
     for s in rows_with:
         uid = s["structure_uuid"]
         surf_bulk = s.get("surface_uncertainty")
+        top1 = _yes_no(surf_bulk["top1_agree"]) if surf_bulk else dash
+        selected = _yes_no(surf_bulk["selected_agree"]) if surf_bulk else dash
+
         gammas = [surf["uncertainty"]["gamma_std"] for surf in s["surfaces"] if surf.get("uncertainty")]
-        if surf_bulk:
-            top1 = ('<span class="text-green-700 font-semibold">yes</span>' if surf_bulk["top1_agree"]
-                    else '<span class="text-amber-700 font-semibold">no</span>')
-            selected = ('<span class="text-green-700 font-semibold">yes</span>' if surf_bulk["selected_agree"]
-                        else '<span class="text-amber-700 font-semibold">no</span>')
-        else:
-            top1 = selected = "&mdash;"
-        gamma_cell = f"{min(gammas):.4f}&ndash;{max(gammas):.4f}" if gammas else "&mdash;"
+        facet_flags = [f"facet {_surface_name(s, surf['surface_id'])}: {_geometry_title(surf['uncertainty'], 'surface')}"
+                       for surf in s["surfaces"]
+                       if surf.get("uncertainty") and surf["uncertainty"].get("geometry_disagreement")]
+        gamma_cell = (f'<span title="{esc(f"largest of the {len(gammas)} per-facet spreads; range {min(gammas):.4f}–{max(gammas):.4f} eV/Å²")}">'
+                      f'{max(gammas):.4f}</span>{_geometry_warning(facet_flags, esc)}' if gammas else dash)
 
         ads_bulk = s.get("adsorption_uncertainty")
+        if ads_bulk:
+            if ads_bulk["best_agree"]:
+                best_agree = _yes_no(True, f"every MLIP picks {_candidate_name(s, ads_bulk['best'][primary])}", esc)
+            else:
+                picks = ads_bulk["best"]
+                others = [f"{m} &rarr; {esc(_candidate_name(s, v))}" for m, v in picks.items()
+                          if v != picks.get(primary)]
+                best_agree = (_yes_no(False) + '<div class="text-xs text-slate-500 mt-1 min-w-[14rem]">'
+                              + "<br>".join(others) + "</div>")
+        else:
+            best_agree = dash
+
         best = s.get("best_candidate")
         best_unc = best.get("uncertainty") if best else None
         if best_unc and ads_meta:
             methods = _committee_methods(best_unc, ads_meta)
-            eta_models = " / ".join(f'{best_unc["eta"][m]:.2f}' for m in methods)
-            eta_cell = f'<span title="{esc(" / ".join(methods))}">{eta_models}</span>'
-            eta_std = f'{best_unc["eta_std"]:.3f}'
-            badge = _committee_badge(best_unc, esc, "adsorption")
+            eta_cell = (f'<span class="whitespace-nowrap" title="{esc(_candidate_name(s, best["row_id"]))}">'
+                        + " / ".join(f'{best_unc["eta"][m]:.2f}' for m in methods) + "</span>")
+            over = eta_tol is not None and best_unc["eta_std"] > eta_tol + 1e-12
+            std_title = (f"sample standard deviation (N-1) of the {len(methods)} eta values "
+                         + ", ".join(f'{m} {best_unc["eta"][m]:.3f}' for m in methods)
+                         + f" V = {best_unc['eta_std']:.3f} V"
+                         + (f"; {'above' if over else 'within'} the {eta_tol:.2f} V tolerance" if eta_tol is not None else ""))
+            eta_flags = ([_geometry_title(best_unc, "adsorption")]
+                         if best_unc.get("geometry_disagreement") else [])
+            eta_std = (f'<span class="{"text-amber-700 font-semibold" if over else "text-green-700"}" '
+                       f'title="{esc(std_title)}">{best_unc["eta_std"]:.3f}</span>'
+                       f'{_geometry_warning(eta_flags, esc)}')
         else:
-            eta_cell = eta_std = badge = "&mdash;"
-        if ads_bulk:
-            stays = ('<span class="text-green-700 font-semibold">yes</span>' if ads_bulk["best_agree"]
-                     else '<span class="text-amber-700 font-semibold">no</span>')
-        else:
-            stays = "&mdash;"
+            eta_cell = eta_std = dash
+
         rows.append(f"""
-                  <tr class="border-t">
+                  <tr class="border-t align-top">
                     <td class="px-4 py-3 font-mono text-xs" title="{esc(uid)}">{esc(uid[:8])}</td>
-                    <td class="px-4 py-3">{top1}</td>
+                    <td class="px-4 py-3 border-l border-slate-200">{top1}</td>
                     <td class="px-4 py-3">{selected}</td>
-                    <td class="px-4 py-3">{gamma_cell}</td>
+                    <td class="px-4 py-3">{best_agree}</td>
+                    <td class="px-4 py-3 border-l border-slate-200 text-right">{gamma_cell}</td>
                     <td class="px-4 py-3">{eta_cell}</td>
-                    <td class="px-4 py-3">{eta_std}</td>
-                    <td class="px-4 py-3">{stays}</td>
-                    <td class="px-4 py-3">{badge or "&mdash;"}</td>
+                    <td class="px-4 py-3 text-right whitespace-nowrap">{eta_std}</td>
                   </tr>""")
 
-    meta = surf_meta or ads_meta
-    order = " / ".join([meta["primary"]] + [m["model"] for m in meta.get("committee", [])])
+    order = " / ".join([primary] + [m["model"] for m in meta.get("committee", [])])
     committee_bit = ", ".join(
         f'{esc(m["model"])}' + (f' ({esc(m["head"])})' if m.get("head") else "")
         for m in meta.get("committee", []))
     k = _fmt(meta.get("force_constant"), 1)
     gamma_floor = _fmt(surf_meta.get("gamma_floor") if surf_meta else None, 4)
     eta_floor = _fmt(ads_meta.get("eta_floor") if ads_meta else None, 2)
-    eta_tol = _fmt(ads_meta.get("eta_tolerance") if ads_meta else None, 2)
+    eta_tol_txt = _fmt(eta_tol, 2)
+    n_selected = surf_meta.get("n_selected") if surf_meta else None
+    n_models = 1 + len(meta.get("committee", []))
+    p = esc(primary)
 
     return f"""
         <section>
@@ -1638,55 +1756,122 @@ def _surface_adsorption_section(summaries, esc):
             <h2 class="text-xl font-bold text-slate-900">Surface &amp; Adsorption Uncertainty</h2>
           </div>
           <div class="bg-white border rounded-xl p-6">
-            <div class="border-l-4 border-primary bg-blue-50 text-slate-700 text-sm rounded-r-lg p-4 mb-5 space-y-2">
-              <p>
-                Surface energies and overpotentials of the primary MLIP (<strong>{esc(meta['primary'])}</strong>)
-                re-scored by a committee of {committee_bit}: <strong>single points on the
-                {esc(meta['primary'])}-relaxed slabs, adsorbate systems and gas references</strong>.
-                Each quantity is computed entirely within one model, with the same formulas the pipeline uses:
-              </p>
-              <div class="bg-white border rounded-lg px-4 py-3 font-mono text-xs leading-6 overflow-x-auto">
-                &gamma;<sub>m</sub> = (E<sub>slab,m</sub> &minus; N<sub>slab</sub> &middot; &epsilon;<sub>bulk,m</sub>) / (2A)<br>
-                &eta;<sub>m</sub>, &Delta;G<sub>i,m</sub> = the reaction's CHE function on model m's energies
-                (same ZPE, references and pinning)<br>
-                &delta;&gamma;<sub>m</sub> = [ &Sigma;<sub>i</sub>|F<sub>i</sub>|<sup>2</sup><sub>slab</sub> / (2k)
-                  + N<sub>slab</sub> &middot; &lang;|F|<sup>2</sup>&rang;<sub>bulk</sub> / (2k) ] / (2A)<br>
-                &delta;&eta;<sub>m</sub> = max<sub>i</sub> &Sigma;<sub>s</sub> |&part;&Delta;G<sub>i</sub>/&part;E<sub>s</sub>|
-                  &middot; &Sigma;<sub>j</sub>|F<sub>j</sub>|<sup>2</sup><sub>s</sub> / (2k)<br>
-                geometry flag: max<sub>m</sub> &delta;&gamma;<sub>m</sub> &gt; max(&sigma;<sub>&gamma;</sub>, {gamma_floor} eV/&Aring;<sup>2</sup>)
-                &nbsp;or&nbsp; max<sub>m</sub> &delta;&eta;<sub>m</sub> &gt; max(&sigma;<sub>&eta;</sub>, {eta_floor} V)
+            <div class="border-l-4 border-primary bg-blue-50 text-slate-700 text-sm rounded-r-lg p-4 mb-5 space-y-3">
+              <div>
+                <h3 class="font-semibold text-slate-900 mb-1">What was compared</h3>
+                <p>
+                  The facets, adsorption candidates and overpotentials in this report come from
+                  <strong>{p}</strong>. A committee of {committee_bit} re-evaluates the same
+                  {p}-relaxed slabs, adsorbate systems and gas references by single points, and each model
+                  computes &gamma; and &eta; on its own energies. The table asks whether the screening
+                  conclusions would change under another model. The spread measures disagreement between
+                  MLIPs; it is not an error bar calibrated against DFT.
+                </p>
+              </div>
+              <div class="grid gap-3 md:grid-cols-2">
+                <div class="bg-white border rounded-lg p-3">
+                  <h4 class="font-semibold text-slate-900 mb-1">Ranking stability</h4>
+                  <p class="text-xs text-slate-600">
+                    Would another model make a different decision in the workflow? <em>Lowest facet</em>:
+                    the same lowest-&gamma; facet. <em>Adsorption facets</em>: the same set of facets carried to
+                    adsorption (lowest {_fmt(n_selected, 0)} by &gamma;). <em>Best candidate</em>: the same lowest-&eta;
+                    adsorption candidate, compared as the complete configuration (facet, site, coverage;
+                    shown as #id), not just the facet.
+                  </p>
+                </div>
+                <div class="bg-white border rounded-lg p-3">
+                  <h4 class="font-semibold text-slate-900 mb-1">Energetic agreement</h4>
+                  <p class="text-xs text-slate-600">
+                    How far apart are the numbers? <em>Best &eta;</em>: the overpotential of {p}'s best
+                    candidate, computed by each model on its own energies (one fixed candidate, not each model's own
+                    best). <em>&sigma;<sub>&eta;</sub></em>: the sample standard deviation of these N values
+                    (N = {n_models} models, {p} included), in V; green if &le; {eta_tol_txt} V, amber above.
+                    <em>Max &sigma;<sub>&gamma;</sub></em>: &sigma;<sub>&gamma;</sub> is the same statistic for each
+                    facet's surface energy; the largest over the bulk's facets is shown (the per-facet values are in
+                    the detailed tables below).
+                  </p>
+                </div>
+              </div>
+              <div class="bg-white border rounded-lg p-3 text-xs text-slate-600 space-y-1">
+                <h4 class="font-semibold text-slate-900 text-sm">Geometry sensitivity <span class="font-normal text-slate-500">(heuristic)</span></h4>
+                <p>
+                  The committee models evaluate {p}'s geometries, not their own minima, so their energies could change
+                  if they relaxed the structures themselves. Residual forces give a rough harmonic estimate of that
+                  effect, which is compared with max(model spread, floor); the floor is {eta_floor} V for &eta; and
+                  {gamma_floor} eV/&Aring;&sup2; for &gamma;. It is an indicator, not a predicted relaxation energy.
+                </p>
+                <ul class="list-disc pl-5 space-y-1">
+                  <li><span class="text-purple-700 font-bold">&#9888;&#xFE0E;</span> next to &sigma;<sub>&eta;</sub> &mdash; the best
+                    candidate is flagged; next to Max &sigma;<sub>&gamma;</sub> &mdash; at least one facet of the bulk is
+                    flagged. For at least one committee model the estimate exceeds the limit: that model is far from its
+                    own minimum on the {p} geometry, and relaxing could move its value by as much as the model spread or
+                    more. The spread is then not a reliable measure of disagreement on its own; after relaxation it could
+                    be larger or smaller. Hover over the marker for the estimate, the limit and the dominant structure.</li>
+                  <li>No marker &mdash; the estimate is below the limit: the residual forces are small compared with how
+                    much the models already disagree, so the spread can be read at face value.</li>
+                </ul>
+                <p>
+                  In the per-bulk tables below the same check is shown for every facet (&gamma; checks) and for the best
+                  candidate of every facet (next to its &eta;) as a chip:
+                  <span class="px-1.5 rounded bg-slate-100 text-slate-600 font-semibold">geometry: low</span> or
+                  <span class="px-1.5 rounded bg-purple-100 text-purple-700 font-semibold">geometry: sensitive (&hellip;)</span>.
+                  The word in brackets names the structure that dominates the estimate:
+                  <em>adsorbate</em> = an adsorbed intermediate (*O, *OH, *OOH, &hellip;);
+                  <em>slab</em> = the clean slab *;
+                  <em>gas reference</em> = a gas molecule (H<sub>2</sub>O, H<sub>2</sub>, O<sub>2</sub>);
+                  <em>bulk</em> = the bulk reference in &gamma; (facets only). The tooltip names the exact species and
+                  model, e.g. &ldquo;dominated by *OOH (UMA)&rdquo;.
+                </p>
               </div>
               <p class="text-xs text-slate-600">
-                &epsilon;<sub>bulk,m</sub>: model m's energy per atom of the bulk the slab was cut from;
-                A: slab area; s: species of the candidate (clean slab *, intermediates, gas references per
-                molecule); &part;&Delta;G<sub>i</sub>/&part;E<sub>s</sub>: coefficient of E<sub>s</sub> in step i;
-                forces of fixed atoms are excluded; stress is not used (slab cells are never relaxed);
-                k = {k} eV/&Aring;<sup>2</sup>.
+                The three checks are reported separately on purpose: a row can agree on energies and still change
+                the ranking, or vice versa. Hover over a cell for per-model values; the per-bulk tables below give
+                each facet and candidate, and the reaction-path diagrams overlay each committee model as thin lines.
               </p>
-              <p>
-                <strong>Labels.</strong> Surfaces: <em>robust</em> = same facet rank under every model,
-                <em>uncertain</em> = rank differs. Candidates: <em>robust</em> = &sigma;<sub>&eta;</sub> &le; {eta_tol} V and
-                the same potential-determining step, <em>uncertain</em> otherwise. <em>geometry (slab / bulk /
-                adsorbate / gas)</em> overrides both and names what dominates the shift. Per surface and candidate
-                details are in the per-bulk tables below (&plusmn; = std over all models; hover for each model's
-                value); the reaction-path diagrams overlay each committee model as thin lines.
-              </p>
-              <p class="text-xs text-slate-500">
-                The spread measures disagreement between MLIPs; it is not an error bar calibrated against DFT.
-              </p>
+              <details class="text-xs text-slate-600">
+                <summary class="cursor-pointer font-semibold text-slate-700">Definitions and thresholds</summary>
+                <div class="bg-white border rounded-lg px-4 py-3 mt-2 font-mono leading-6 overflow-x-auto">
+                  &gamma;<sub>m</sub> = (E<sub>slab,m</sub> &minus; N<sub>slab</sub> &middot; &epsilon;<sub>bulk,m</sub>) / (2A)<br>
+                  &eta;<sub>m</sub>, &Delta;G<sub>i,m</sub> = the reaction's CHE function on model m's energies
+                  (same ZPE, references and pinning)<br>
+                  &sigma;<sub>&eta;</sub> = &radic;[ &Sigma;<sub>m</sub> (&eta;<sub>m</sub> &minus; &eta;&#772;)<sup>2</sup> / (N &minus; 1) ],
+                    &eta;&#772; = &Sigma;<sub>m</sub> &eta;<sub>m</sub> / N, m &isin; {{{esc(order)}}}, for one fixed candidate
+                    ({p}'s best); &sigma;<sub>&gamma;</sub> likewise per facet<br>
+                  heuristic geometry estimates (harmonic, force constant k):<br>
+                  &nbsp;&nbsp;&delta;&gamma;<sub>m</sub> = [ &Sigma;<sub>i</sub>|F<sub>i</sub>|<sup>2</sup><sub>slab</sub> / (2k)
+                    + N<sub>slab</sub> &middot; &lang;|F|<sup>2</sup>&rang;<sub>bulk</sub> / (2k) ] / (2A)<br>
+                  &nbsp;&nbsp;&delta;&eta;<sub>m</sub> = max<sub>i</sub> &Sigma;<sub>s</sub> |&part;&Delta;G<sub>i</sub>/&part;E<sub>s</sub>|
+                    &middot; &Sigma;<sub>j</sub>|F<sub>j</sub>|<sup>2</sup><sub>s</sub> / (2k)<br>
+                  sensitive: max<sub>m</sub> &delta;&gamma;<sub>m</sub> &gt; max(&sigma;<sub>&gamma;</sub>, {gamma_floor} eV/&Aring;<sup>2</sup>)
+                  &nbsp;or&nbsp; max<sub>m</sub> &delta;&eta;<sub>m</sub> &gt; max(&sigma;<sub>&eta;</sub>, {eta_floor} V)
+                </div>
+                <p class="mt-2">
+                  &epsilon;<sub>bulk,m</sub>: model m's energy per atom of the bulk the slab was cut from;
+                  A: slab area; s: species of the candidate (clean slab *, intermediates, gas references per
+                  molecule); &part;&Delta;G<sub>i</sub>/&part;E<sub>s</sub>: coefficient of E<sub>s</sub> in step i;
+                  forces of fixed atoms are excluded; stress is not used (slab cells are never relaxed);
+                  k = {k} eV/&Aring;<sup>2</sup>. The estimate assumes an isotropic harmonic well with a single
+                  force constant, so it indicates where geometry may matter rather than predicting the energy
+                  change.
+                </p>
+              </details>
             </div>
             <div class="overflow-x-auto border rounded-lg">
               <table class="w-full text-sm text-left text-slate-700">
                 <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
                   <tr>
+                    <th class="px-4 pt-3 pb-1"></th>
+                    <th colspan="3" class="px-4 pt-3 pb-1 text-center border-b border-l border-slate-200">Ranking stability</th>
+                    <th colspan="3" class="px-4 pt-3 pb-1 text-center border-b border-l border-slate-200">Energetic agreement</th>
+                  </tr>
+                  <tr>
                     <th class="px-4 py-3">Bulk</th>
-                    <th class="px-4 py-3" title="All MLIPs pick the same lowest-gamma facet">Lowest facet agrees</th>
+                    <th class="px-4 py-3 border-l border-slate-200" title="All MLIPs pick the same lowest-gamma facet">Lowest facet agrees</th>
                     <th class="px-4 py-3" title="All MLIPs pick the same facets for adsorption">Adsorption facets agree</th>
-                    <th class="px-4 py-3"><span class="normal-case">&sigma;<sub>&gamma;</sub></span> range (eV/&Aring;&sup2;)</th>
-                    <th class="px-4 py-3">Best &eta; <span class="normal-case">({esc(order)})</span></th>
-                    <th class="px-4 py-3"><span class="normal-case">&sigma;<sub>&eta;</sub></span> (V)</th>
-                    <th class="px-4 py-3" title="The primary's best candidate is also best for every MLIP">Best stays best</th>
-                    <th class="px-4 py-3">Label</th>
+                    <th class="px-4 py-3" title="All MLIPs pick the same lowest-eta adsorption candidate (facet + site + coverage)">Best candidate agrees</th>
+                    <th class="px-4 py-3 border-l border-slate-200 text-right" title="largest per-facet standard deviation of gamma over all models">Max <span class="normal-case">&sigma;<sub>&gamma;</sub></span> (eV/&Aring;&sup2;)</th>
+                    <th class="px-4 py-3" title="eta of the primary's best candidate under each model">Best &eta; <span class="normal-case">({esc(order)})</span> (V)</th>
+                    <th class="px-4 py-3 text-right" title="sample standard deviation of the Best-eta values over all models"><span class="normal-case">&sigma;<sub>&eta;</sub></span> (V)</th>
                   </tr>
                 </thead>
                 <tbody>{"".join(rows)}</tbody>
@@ -1860,10 +2045,8 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                     methods = _committee_methods(unc, surf_meta)
                     rank_cell = (f'<span title="{esc(" / ".join(methods))}">'
                                  + " / ".join(str(unc["rank"].get(m, "?")) for m in methods) + "</span>")
-                    via = (f'<br><span class="text-xs text-slate-500">via '
-                           f'{esc(_committee_via_text(unc, "surface"))}</span>'
-                           if unc.get("geometry_disagreement") else "")
-                    label_cell = _committee_badge(unc, esc, "surface") + via
+                    label_cell = ('<div class="flex flex-wrap gap-1">' + _rank_chip(unc, esc, methods)
+                                  + _geometry_chip(unc, esc, "surface") + "</div>")
                 else:
                     rank_cell = label_cell = "&mdash;"
                 unc_cells = (f'<td class="px-4 py-3">{rank_cell}</td>'
@@ -1890,7 +2073,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
         if surf_unc_present:
             order = " / ".join([surf_meta["primary"]] + [m["model"] for m in surf_meta.get("committee", [])])
             unc_head = (f'<th class="px-4 py-3" title="Rank of the facet within this bulk ({esc(order)})">'
-                        '&gamma; rank</th><th class="px-4 py-3">&gamma; label</th>')
+                        '&gamma; rank</th><th class="px-4 py-3">&gamma; checks</th>')
         else:
             unc_head = ""
         committee_note = _committee_note(s, esc)
@@ -2144,11 +2327,11 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
 
         {uncertainty_section}
 
-        {surface_adsorption_section}
+        {synth_section}
 
         {light_section}
 
-        {synth_section}
+        {surface_adsorption_section}
 
         <section class="flex flex-col gap-6">
           <div class="flex items-center gap-2">

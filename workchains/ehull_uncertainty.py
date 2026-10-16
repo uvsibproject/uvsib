@@ -36,7 +36,9 @@ Rules
   systematic lattice-constant offset of the model, which largely cancels in
   E_hull. A model's signed hull distance can move by at most
   ``delta_m = dE_relax(target) + sum_j x_j dE_relax(j)`` over the phases j (atom
-  fractions x_j) it is compared against. The target is flagged when the largest
+  fractions x_j) it is compared against. ``delta_m`` is also reported split into
+  its force and stress parts (same sum over the force / stress terms), which tell
+  residual atomic forces apart from an imperfectly relaxed cell. The target is flagged when the largest
   ``delta_m`` exceeds ``max(std(ed), relax_energy_floor)``: the possible
   geometry shift is as large as the model disagreement itself (and not
   negligible), so the spread cannot be trusted on its own. The structure that
@@ -187,18 +189,23 @@ def committee_ehull(target_uuids, entries, diagnostics, primary,
         # own relaxation energy + the fraction-weighted ones of the phases it
         # is compared against
         geometry_shift, contributions = {}, {}
+        geometry_shift_force, geometry_shift_stress = {}, {}
         for m in committee:
-            parts = [(uuid, 1.0, relax[m][uuid][0])]
-            parts += [(u, x, relax[m][u][0]) for u, x in decomp_fractions[m].items() if u != uuid]
+            parts = [(uuid, 1.0, *relax[m][uuid])]
+            parts += [(u, x, *relax[m][u]) for u, x in decomp_fractions[m].items() if u != uuid]
             contributions[m] = sorted(
                 [{"uuid": u, "model": m, "fraction": x, "relax_energy": e,
-                  "shift": x * e, "self": u == uuid,
+                  "relax_force": e_force, "relax_stress": e_stress,
+                  "shift": x * e, "shift_force": x * (e_force or 0.0),
+                  "shift_stress": x * (e_stress or 0.0), "self": u == uuid,
                   "max_force": (diagnostics.get(m, {}).get(u) or {}).get("max_force"),
                   "max_stress": (diagnostics.get(m, {}).get(u) or {}).get("max_stress"),
                   "pressure": (diagnostics.get(m, {}).get(u) or {}).get("pressure")}
-                 for u, x, e in parts if e is not None],
+                 for u, x, e, e_force, e_stress in parts if e is not None],
                 key=lambda c: -c["shift"])
             geometry_shift[m] = float(sum(c["shift"] for c in contributions[m]))
+            geometry_shift_force[m] = float(sum(c["shift_force"] for c in contributions[m]))
+            geometry_shift_stress[m] = float(sum(c["shift_stress"] for c in contributions[m]))
 
         worst_model = max(geometry_shift, key=geometry_shift.get) if geometry_shift else None
         shift_max = geometry_shift[worst_model] if worst_model else 0.0
@@ -238,8 +245,15 @@ def committee_ehull(target_uuids, entries, diagnostics, primary,
             "worst_force": max(forces) if forces else None,
             "worst_stress": max(stresses) if stresses else None,
             "relax_energy": {m: relax[m][uuid][0] for m in committee},
+            "relax_energy_force": {m: relax[m][uuid][1] for m in committee},
+            "relax_energy_stress": {m: relax[m][uuid][2] for m in committee},
             "geometry_shift": geometry_shift,
             "geometry_shift_max": shift_max,
+            # force / stress parts of the governing model's shift (they add up to it)
+            "geometry_shift_force": geometry_shift_force,
+            "geometry_shift_stress": geometry_shift_stress,
+            "geometry_shift_force_max": geometry_shift_force[worst_model] if worst_model else 0.0,
+            "geometry_shift_stress_max": geometry_shift_stress[worst_model] if worst_model else 0.0,
             "geometry_shift_model": worst_model,
             "geometry_limit": geometry_limit,
             "geometry_source": (("self" if dominant["self"] else "competing")

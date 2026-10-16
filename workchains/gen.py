@@ -134,7 +134,7 @@ class GeneratorWorkChain(WorkChain):
                                                            element_entries=self.ctx.ref_entries)
 
             if not low_energy_entries:
-                self.report(f"Warning: No low-energy generated structures for {chemical_system}")
+                self.report(f"ERROR: No low-energy generated structures for {chemical_system}")
                 failed_ml_e.append(chemical_system)
                 continue
 
