@@ -24,7 +24,7 @@ def get_options(job_info):
         'max_wallclock_seconds': job_script['time'],
         'parser_name': 'phonon_parser',
     }
-    if job_script['exclusive']:
+    if job_script.get('exclusive'):
         options.update({'custom_scheduler_commands': '#SBATCH --exclusive'})
     return options
 
@@ -35,7 +35,8 @@ def get_structures_file(structures):
     Accepts a plain list or an AiiDA ``List`` node (unwrapped via ``get_list``)."""
     if hasattr(structures, "get_list"):
         structures = structures.get_list()
-    path = os.path.join(tempfile.gettempdir(), "input_structures.json")
+    # own temp dir per call: chunks are staged concurrently by PhononScreenWorkChain
+    path = os.path.join(tempfile.mkdtemp(), "input_structures.json")
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(structures, f)
     return SinglefileData(file=path)

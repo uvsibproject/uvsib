@@ -87,6 +87,18 @@ OPTICAL_SCREEN_ENABLED = bool(inputs.get('optical_screen', {}).get('enabled', Tr
 # PhaseDiagramMLWorkChain (exit 305).
 SYNTHESIZABILITY_ENABLED = bool(inputs.get('synthesizability', {}).get('enabled', True))
 
+# MLIP phonon screen (PhononScreenWorkChain) as a MainWorkChain step
+# (step_status["phonon"]) after the phase-diagram stages. Only the *predicted*
+# bulks of the ML selection (DBStructureVersion.source in csp / generated) are
+# phononed -- Materials Project structures are skipped. It flags dynamically
+# unstable bulks (imaginary modes) and stores F_vib(T); it does not filter
+# structures. On by default; disable via input.yaml (`phonon: {enabled: false}`).
+# Mandatory when enabled: a failed phonon calculation (or a missing code) marks
+# the step and composition Failed and stops the MainWorkChain (exit 300). Uses
+# an optional `Phonon` codes block in config.yaml, else the phonon model's own
+# block. See docs/phonon_workchain.md.
+PHONON_ENABLED = bool(inputs.get('phonon', {}).get('enabled', True))
+
 # Soft stop: gracefully end the MainWorkChain after the generation/phase-diagram
 # stages, before the surface builder (and adsorbates) start.
 # Opt-in via input.yaml (`soft_stop: {before_surface_builder: true}`); absent or

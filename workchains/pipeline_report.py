@@ -16,6 +16,7 @@ Public API:
     reaction_results(chemical_formula, reaction, reaction_path) -> {structure_uuid: [candidate dict, ...]}  # now includes "repeat"/"coverage" (adsorbate concentration, in ML)
     electronic_for_bulk(chemical_formula) -> {structure_uuid: band_info dict}  # no-DFT light screen (empty if OpticalScreenWorkChain not run); negative ML gaps clamped to 0
     synthesizability_for_bulk(chemical_formula) -> {structure_uuid: [prediction dict, ...]}  # CSLLM screen (empty if SynthesizabilityScreenWorkChain not run)
+    phonon_for_bulk(chemical_formula) -> {structure_uuid: [phonon dict, ...]}  # MLIP phonons of predicted bulks (empty if PhononScreenWorkChain not run)
     step_labels(reaction, reaction_path) -> [str, ...] | None
     summarize(chemical_formula, reaction, reaction_path) -> [bulk summary dict, ...]  # each surface now also carries its OWN reaction_candidates/best_candidate
     report(chemical_formula, reaction, reaction_path, plot_dir=None) -> [bulk summary dict, ...]
@@ -92,7 +93,7 @@ Caveats worth knowing:
 """
 from collections import defaultdict
 
-from uvsib.db.tables import DBComposition, DBSurface, DBSurfaceMLAdsorbate, DBSynthesizability
+from uvsib.db.tables import DBComposition, DBSurface, DBSurfaceMLAdsorbate, DBSynthesizability, DBPhonon
 from uvsib.db.utils import query_by_columns, query_structure
 from uvsib.workchains.surface_uncertainty import adsorption_bulk_summary
 
@@ -380,6 +381,30 @@ def synthesizability_for_bulk(chemical_formula):
     return dict(out)
 
 
+def phonon_for_bulk(chemical_formula):
+    """``{structure_uuid: [phonon dict, ...]}`` -- the DBPhonon rows
+    PhononScreenWorkChain wrote (one per model; predicted bulks only), sorted
+    by model name. Empty when the screen was not run. DB-only, no AiiDA
+    profile needed."""
+    out = defaultdict(list)
+    for row in query_by_columns(DBPhonon, {"composition": chemical_formula}):
+        out[str(row.structure_uuid)].append({
+            "model": row.phonon_model,
+            "source": row.source,
+            "status": row.status,
+            "dynamically_stable": row.dynamically_stable,
+            "min_frequency_THz": row.min_frequency_THz,
+            "n_imaginary_qpoints": row.n_imaginary_qpoints,
+            "e0": row.e0,
+            "free_energy_300K": row.free_energy_300K,
+            "ehull": row.ehull,
+            "attributes": row.attributes or {},
+        })
+    for results in out.values():
+        results.sort(key=lambda r: r["model"])
+    return dict(out)
+
+
 _OER_LABELS = ["*", "*OH", "*O", "*OOH", "O2 + *"]
 
 _REACTION_MODULES = {
@@ -441,6 +466,7 @@ def summarize(chemical_formula, reaction, reaction_path):
     results_by_uuid = reaction_results(chemical_formula, reaction, reaction_path)
     electronic_by_uuid = electronic_for_bulk(chemical_formula)
     synthesizability_by_uuid = synthesizability_for_bulk(chemical_formula)
+    phonon_by_uuid = phonon_for_bulk(chemical_formula)
     surface_unc = surface_uncertainty_summary(chemical_formula) or {}
 
     all_uuids = set(bulks) | set(surfaces_by_uuid) | set(results_by_uuid)
@@ -477,6 +503,7 @@ def summarize(chemical_formula, reaction, reaction_path):
             "best_candidate": candidates[0] if candidates else None,
             "electronic": electronic_by_uuid.get(uid),
             "synthesizability": synthesizability_by_uuid.get(uid, []),
+            "phonon": phonon_by_uuid.get(uid, []),
             "surface_uncertainty": (surface_unc.get("per_bulk") or {}).get(uid),
             "surface_uncertainty_meta": ({k: v for k, v in surface_unc.items() if k != "per_bulk"}
                                          if surface_unc else None),
@@ -1328,6 +1355,122 @@ def _ehull_with_spread(bulk, esc):
              f"{unc['n_models']} MLIPs; range {unc['ehull_min']:.3f}–{unc['ehull_max']:.3f}")
     return (f'<span title="{esc(title)}">{bulk["ehull"]:.4f} &plusmn; '
             f'{unc["ed_std"]:.3f}</span>')
+
+
+_PHONON_SOURCE_NAMES = {"csp": "CSP", "generated": "generated"}
+
+
+def _phonon_section(summaries, esc):
+    """``(html, models_label)`` for the "Lattice dynamics" block -- one row
+    per (bulk, model) from ``summary["phonon"]``. ``("", None)`` when
+    PhononScreenWorkChain wrote nothing for this composition. Materials
+    Project bulks are never phononed, so they are listed as such."""
+    if not any(s.get("phonon") for s in summaries):
+        return "", None
+
+    results_all = [r for s in summaries for r in s.get("phonon") or []]
+    models = sorted({r["model"] for r in results_all})
+    show_model = len(models) > 1
+    n_cols = 7 + show_model
+
+    rows = []
+    for s in summaries:
+        uid = s["structure_uuid"]
+        b = s["bulk"]
+        ehull_cell = f'{b["ehull"]:.4f}' if b else "&mdash;"
+        results = s.get("phonon") or []
+        if not results:
+            source = (b or {}).get("source") or ""
+            why = ("Materials Project structure &mdash; not phononed"
+                   if source.startswith("MPDB") else "not phononed")
+            rows.append(
+                f'<tr class="border-t"><td class="px-4 py-3 font-mono text-xs" title="{esc(uid)}">{esc(uid[:8])}</td>'
+                f'<td class="px-4 py-3">{ehull_cell}</td>'
+                f'<td class="px-4 py-3 text-slate-400 italic" colspan="{n_cols - 2}">{why}</td></tr>')
+            continue
+        for r in results:
+            attrs = r.get("attributes") or {}
+            if r.get("status") != "ok":
+                verdict = ('<span class="px-2 py-0.5 rounded bg-slate-100 text-slate-600 text-xs font-bold">'
+                           'failed</span>')
+            elif r.get("dynamically_stable"):
+                verdict = ('<span class="px-2 py-0.5 rounded bg-green-100 text-green-700 text-xs font-bold '
+                           'whitespace-nowrap">dynamically stable</span>')
+            else:
+                verdict = ('<span class="px-2 py-0.5 rounded bg-red-100 text-red-700 text-xs font-bold '
+                           'whitespace-nowrap">imaginary modes</span>')
+            fmin = r.get("min_frequency_THz")
+            fmin_cell = f"{fmin:.2f}" if fmin is not None else "&mdash;"
+            n_imag, n_q = r.get("n_imaginary_qpoints"), attrs.get("n_qpoints")
+            imag_cell = f"{n_imag} / {n_q}" if n_imag is not None and n_q else "&mdash;"
+            f300 = r.get("free_energy_300K")
+            f300_cell = f"{f300 * 1000:.1f}" if f300 is not None else "&mdash;"
+            sc = attrs.get("supercell_matrix")
+            sc_cell = ("&times;".join(str(n) for n in sc)
+                       + (f' <span class="text-slate-400">({attrs.get("n_atoms_supercell")} at.)</span>'
+                          if attrs.get("n_atoms_supercell") else "")) if sc else "&mdash;"
+            if r.get("status") != "ok" and attrs.get("error"):
+                sc_cell = f'<span class="text-[10px] text-red-600">{esc(attrs["error"])}</span>'
+            cells = [f'<td class="px-4 py-3 font-mono text-xs" title="{esc(uid)}">{esc(uid[:8])}</td>',
+                     f'<td class="px-4 py-3">{ehull_cell}</td>',
+                     f'<td class="px-4 py-3">{esc(_PHONON_SOURCE_NAMES.get(r.get("source"), r.get("source") or ""))}</td>']
+            if show_model:
+                cells.append(f'<td class="px-4 py-3">{esc(r["model"])}</td>')
+            cells += [f'<td class="px-4 py-3">{verdict}</td>',
+                      f'<td class="px-4 py-3">{fmin_cell}</td>',
+                      f'<td class="px-4 py-3">{imag_cell}</td>',
+                      f'<td class="px-4 py-3">{f300_cell}</td>',
+                      f'<td class="px-4 py-3">{sc_cell}</td>']
+            rows.append('\n                      <tr class="border-t align-top">'
+                        + "".join(cells) + "</tr>")
+
+    headers = ["Bulk", "E<sub>hull</sub> (eV/atom)", "Source"]
+    if show_model:
+        headers.append("Model")
+    headers += ["Verdict", "Lowest &nu; (THz)", "Imag. q-points",
+                "F<sub>vib</sub>(300 K) (meV/atom)", "Supercell"]
+    header_html = "".join(f'<th class="px-4 py-3">{h}</th>' for h in headers)
+
+    params = next(((r.get("attributes") or {}).get("run_params") for r in results_all
+                   if (r.get("attributes") or {}).get("run_params")), None) or {}
+    tol = params.get("imaginary_tol_THz")
+    tol_bit = (f" A mode below &minus;{tol:g} THz away from &Gamma; counts as imaginary."
+               if tol is not None else "")
+    n_vol = len(params.get("volume_scales") or [1.0])
+    method_bit = ("harmonic approximation at the relaxed volume" if n_vol == 1
+                  else f"quasi-harmonic approximation over {n_vol} volumes")
+
+    html = f"""
+        <section>
+          <div class="flex items-center gap-2 mb-4">
+            <i data-lucide="activity" class="w-5 h-5 text-primary"></i>
+            <h2 class="text-xl font-bold text-slate-900">Lattice dynamics</h2>
+          </div>
+          <div class="bg-white border rounded-xl p-6">
+            <div class="border-l-4 border-primary bg-blue-50 text-slate-700 text-sm rounded-r-lg p-4 mb-5 space-y-2">
+              <p>
+                Phonons (finite displacements with the MLIP, {method_bit}) for the
+                <strong>predicted</strong> bulks that passed the E<sub>above hull</sub> screen;
+                Materials Project structures are not recomputed. Imaginary modes mean the
+                structure is a saddle point, not a minimum, of the MLIP energy surface.{tol_bit}
+                <strong>F<sub>vib</sub>(300 K)</strong> is the vibrational free-energy correction
+                G(300 K) &minus; E<sub>0</sub>.
+              </p>
+              <p class="text-xs text-slate-500">
+                No structure is removed on this basis.
+              </p>
+            </div>
+            <div class="overflow-x-auto border rounded-lg">
+              <table class="w-full text-sm text-left text-slate-700">
+                <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
+                  <tr>{header_html}</tr>
+                </thead>
+                <tbody>{"".join(rows)}</tbody>
+              </table>
+            </div>
+          </div>
+        </section>"""
+    return html, ", ".join(models)
 
 
 def _uncertainty_section(summaries, esc):
@@ -2218,6 +2361,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
         light_section = ""
 
     synth_section, synth_models = _synthesizability_section(summaries, esc)
+    phonon_section, phonon_models = _phonon_section(summaries, esc)
     uncertainty_section = _uncertainty_section(summaries, esc)
     surface_adsorption_section = _surface_adsorption_section(summaries, esc)
     analysed_candidates = [c["uncertainty"] for s in summaries
@@ -2329,6 +2473,8 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
 
         {synth_section}
 
+        {phonon_section}
+
         {light_section}
 
         {surface_adsorption_section}
@@ -2408,6 +2554,15 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
               <div>
                 <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">Synthesizability</p>
                 <p class="text-sm font-bold text-slate-900">{esc(synth_models) if synth_models else "not run"}</p>
+              </div>
+            </div>
+            <div class="flex items-center gap-4">
+              <div class="size-10 rounded-full bg-violet-100 text-violet-600 flex items-center justify-center shrink-0">
+                <i data-lucide="activity" class="w-6 h-6"></i>
+              </div>
+              <div>
+                <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">Phonons</p>
+                <p class="text-sm font-bold text-slate-900">{esc(phonon_models) if phonon_models else "not run"}</p>
               </div>
             </div>
           </div>

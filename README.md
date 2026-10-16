@@ -54,7 +54,9 @@ These models can be used for rapid structure relaxation and screening before mor
 ### Thermodynamic stability
 
 - machine-learning phase-diagram construction and convex-hull analysis;
-- DFT phase-diagram verification.
+- DFT phase-diagram verification;
+- MLIP phonons / dynamical stability (`PhononScreenWorkChain`) for the predicted (non-Materials-Project)
+  bulks of the ML selection, with harmonic or quasi-harmonic vibrational free energies.
 
 ### Electronic structure and light harvesting
 
@@ -102,6 +104,7 @@ The `aiida.workflows` entry points currently include:
 | `minimahopping` | Minima-hopping structure search |
 | `mpdbml` | ML relaxation of Materials Project database structures |
 | `phasediagram` | ML phase-diagram construction and stable-structure selection |
+| `phononscreen`, `phonon` | MLIP phonons / dynamical stability of the predicted bulks (see `docs/phonon_workchain.md`) |
 | `opticalscreen`, `electronic` | No-DFT band-gap / band-edge light-harvesting screen |
 | `bandalignment` | DFT (PBE + HSE) band alignment |
 | `surfacebuilder` | Slab construction, relaxation, and surface selection |
@@ -146,7 +149,7 @@ holding only what that one runner (`codes/files/*.py`) needs. These are **not** 
 
 **ML interatomic potentials** (one env per backend): `mattersim`, `mace-torch` (MACE), `upet` (uPET),
 `fairchem` (UMA), `sevenn` (SevenNet) — each with its own `torch` build; `tensorpotential` (GRACE,
-TensorFlow-based); plus `minimahopping` for the minima-hopping runner.
+TensorFlow-based); plus `minimahopping` for the minima-hopping runner and `phonopy` for the phonon runner.
 
 **Generative models**: `mattergen`, the GNoME SAPS runner (pymatgen only), and `diffcsp` (its upstream
 repo checkout, `torch`, `pytorch-lightning`, `hydra-core`, …).

@@ -10,7 +10,7 @@
     "reentry_register": true,
     "python_requires": ">=3.10",
     "install_requires": [
-        "aiida-submission-controller==0.1.2", "mp-api","aiida-pythonjob==0.4.8", "aiida-vasp==4.1.0",
+        "aiida-submission-controller==0.1.2", "mp-api","aiida-pythonjob==0.4.9", "aiida-vasp==4.1.0",
 		"ase",
 		"phonopy", "icet", "pymatgen"
     ],
@@ -28,7 +28,8 @@
 		"mh = uvsib.codes.minimahopping.calculation:MinimaHoppingCalculation",
 		"sqs = uvsib.codes.sqs.calculation:SQSCalculation",
 		"electronic = uvsib.codes.electronic.calculation:ElectronicCalculation",
-		"csllm = uvsib.codes.csllm.calculation:CSLLMCalculation"
+		"csllm = uvsib.codes.csllm.calculation:CSLLMCalculation",
+		"phonon = uvsib.codes.phonon.calculation:PhononCalculation"
 	],
 	"aiida.parsers": [
 		"mattergen_parser = uvsib.codes.mattergen.parser:MatterGenParser",
@@ -44,7 +45,8 @@
 		"sqs_parser = uvsib.codes.sqs.parser:SQSParser",
 		"electronic_parser = uvsib.codes.electronic.parser:ElectronicParser",
 		"generic_parser = uvsib.workchains.parser:GenericParser",
-		"csllm_parser = uvsib.codes.csllm.parser:CSLLMParser"
+		"csllm_parser = uvsib.codes.csllm.parser:CSLLMParser",
+		"phonon_parser = uvsib.codes.phonon.parser:PhononParser"
 	],
 	"aiida.workflows": [
 		"mattergen.base = uvsib.codes.mattergen.workchain:MatterGenBaseWorkChain",
@@ -72,6 +74,8 @@
 		"electronic = uvsib.codes.electronic.workchain:ElectronicWorkChain",
 		"csllm = uvsib.codes.csllm.workchain:CSLLMWorkChain",
 		"synthesizabilityscreen = uvsib.workchains.synthesizability_screen:SynthesizabilityScreenWorkChain",
+		"phonon = uvsib.codes.phonon.workchain:PhononWorkChain",
+		"phononscreen = uvsib.workchains.phonon_screen:PhononScreenWorkChain",
 		"adsorbates = uvsib.workchains.adsorbates:AdsorbatesWorkChain",
 		"akmc = uvsib.workchains.akmc:AKMCWorkChain",
 		"sqs = uvsib.workchains.sqs:SQSWorkChain",

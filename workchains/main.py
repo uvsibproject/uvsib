@@ -65,6 +65,14 @@ class MainWorkChain(WorkChain):
                 cls.pd_verification,
                 cls.inspect_pd_verification
             ),
+            if_(cls.should_run_phonon)(
+                while_(cls.should_wait_phonon)(
+                    cls.wait_sleep,
+                    cls.check_pythonjob_sleep
+                ),
+                cls.phonon,
+                cls.inspect_phonon
+            ),
             if_(cls.should_run_sqs)(
                 while_(cls.should_wait_sqs)(
                     cls.wait_sleep,
@@ -173,6 +181,23 @@ class MainWorkChain(WorkChain):
             return False
         return True
 
+    def should_run_phonon(self):
+        """Check whether should run PhononScreen (MLIP phonons of the predicted
+        bulks in the ML selection; Materials Project bulks are skipped inside
+        the workchain). Runs even under the surface soft stop: it annotates the
+        bulks, like the phase-diagram stages before it."""
+        if self.ctx.sqs:
+            return False
+        if not settings.PHONON_ENABLED:
+            return False
+        if self._fresh_step_status().get("phonon") in ["Done"]:
+            return False
+        stable = self.ctx.dbcomposition_row.stable_struct or {}
+        if not stable.get("ml_uuid_list"):
+            self.report("Phonon screen: no ML bulk selection to phonon; skipping.")
+            return False
+        return True
+
     def should_run_sqs(self):
         """Check whether should run PhaseDiagramML"""
         if not self.ctx.sqs:
@@ -268,6 +293,13 @@ class MainWorkChain(WorkChain):
         pd_ver_step_status = self._fresh_step_status().get("pd_verification")
         if pd_ver_step_status in ["Running"]:
             self.ctx.sts = "phase diagram verification"
+            return True
+        return False
+
+    def should_wait_phonon(self):
+        """Should wait for another running WorkChain"""
+        if self._fresh_step_status().get("phonon") in ["Running"]:
+            self.ctx.sts = "phonon screen"
             return True
         return False
 
@@ -413,6 +445,47 @@ class MainWorkChain(WorkChain):
 
         # update row status in DBComposition table
         update_step_status_path(DBComposition, row.uuid, ["pd_verification"], "Done")
+        update_row(DBComposition, row.uuid, {"status": "Running"})
+
+    def phonon(self):
+        """Running PhononScreenWorkChain"""
+        # Re-check after waiting: another MainWorkChain may have completed it.
+        if self._step_done("phonon"):
+            self.report(
+                f"Skipping PhononScreen WorkChain for {self.ctx.chemical_formula}: "
+                "it was completed by another WorkChain."
+            )
+            return
+
+        row = self.ctx.dbcomposition_row
+        update_step_status_path(DBComposition, row.uuid, ["phonon"], "Running")
+        update_row(DBComposition, row.uuid, {"status": "Running"})
+        try:
+            builder = self._construct_phonon_builder()
+            future = self.submit(builder)
+        except Exception as exc:  # e.g. the phonon model's code is not configured
+            update_step_status_path(DBComposition, row.uuid, ["phonon"], "Failed")
+            update_row(DBComposition, row.uuid, {"status": "Failed"})
+            self.report(f"Cannot submit PhononScreen WorkChain ({exc})")
+            return self.exit_codes.ERROR_CALCULATION_FAILED
+        self.to_context(**{"phonon": future})
+
+    def inspect_phonon(self):
+        """Inspecting PhononScreenWorkChain. Mandatory when enabled: a failure
+        stops the MainWorkChain."""
+        # return if WorkChain was not set
+        if "phonon" not in self.ctx:
+            return
+
+        wch = self.ctx.phonon
+        row = self.ctx.dbcomposition_row
+        if not wch.is_finished_ok:
+            update_step_status_path(DBComposition, row.uuid, ["phonon"], "Failed")
+            update_row(DBComposition, row.uuid, {"status": "Failed"})
+            self.report(f"PhononScreen WorkChain failed (exit {wch.exit_status})")
+            return self.exit_codes.ERROR_CALCULATION_FAILED
+
+        update_step_status_path(DBComposition, row.uuid, ["phonon"], "Done")
         update_row(DBComposition, row.uuid, {"status": "Running"})
 
     def sqs(self):
@@ -660,6 +733,13 @@ class MainWorkChain(WorkChain):
         """Build PDVerification WorkChain builder"""
         PDVerificationWorkChain = WorkflowFactory("pdverification")
         builder = PDVerificationWorkChain.get_builder()
+        builder.chemical_formula = Str(self.ctx.chemical_formula)
+        return builder
+
+    def _construct_phonon_builder(self):
+        """PhononScreen WorkChain builder (MLIP phonons of the predicted bulks)"""
+        PhononScreenWorkChain = WorkflowFactory("phononscreen")
+        builder = PhononScreenWorkChain.get_builder()
         builder.chemical_formula = Str(self.ctx.chemical_formula)
         return builder
 

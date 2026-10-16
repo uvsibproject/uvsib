@@ -4,7 +4,7 @@ from sqlalchemy import inspect, delete, text, func, not_
 from pymatgen.core import Composition, Structure
 from uvsib.db.session import get_session
 from uvsib.db.tables import (DBChemsys, DBStructure, DBStructureVersion, DBSurface,
-                             DBSurfaceMLAdsorbate, DBSynthesizability)
+                             DBSurfaceMLAdsorbate, DBSynthesizability, DBPhonon)
 
 
 # EhullUncertaintyWorkChain stores committee single points (energy of a committee
@@ -360,6 +360,23 @@ def upsert_synthesizability(values):
             synthesizability_model=values["synthesizability_model"]).first()
         if row is None:
             session.add(DBSynthesizability(**values))
+        else:
+            for key, value in values.items():
+                setattr(row, key, value)
+        session.commit()
+    return True
+
+
+def upsert_phonon(values):
+    """Insert or overwrite the DBPhonon row keyed by
+    ``(values["structure_uuid"], values["phonon_model"])`` -- a rerun of
+    PhononScreenWorkChain replaces its previous result."""
+    with get_session() as session:
+        row = session.query(DBPhonon).filter_by(
+            structure_uuid=values["structure_uuid"],
+            phonon_model=values["phonon_model"]).first()
+        if row is None:
+            session.add(DBPhonon(**values))
         else:
             for key, value in values.items():
                 setattr(row, key, value)

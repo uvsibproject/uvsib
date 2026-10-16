@@ -87,8 +87,9 @@ def relax_positions(atoms, calc, fmax, steps):
 def harmonic_free_energy(atoms, calc, params):
     """Harmonic F_vib(T) and S_vib(T) per atom at the given (fixed) cell.
 
-    Returns ``(temperatures, F_per_atom [eV], S_per_atom [kB], imaginary,
-    n_prim_atoms, static_energy_per_atom)``.
+    Returns ``(temperatures, F_per_atom [eV], S_per_atom [kB], freq_stats,
+    n_prim_atoms, static_energy_per_atom)``; ``freq_stats`` holds the
+    dynamical-stability summary of the mesh (see ``_frequency_stats``).
     """
     from phonopy import Phonopy
 
@@ -123,11 +124,35 @@ def harmonic_free_energy(atoms, calc, params):
     # phonopy entropy is J/K/mol per primitive cell -> kB/atom (S/R/n_prim)
     s_per_atom = np.asarray(tp["entropy"], dtype=float) / (R_J_PER_K_MOL * n_prim)
 
-    # imaginary modes show up as negative frequencies on the mesh
-    freqs = phonon.get_mesh_dict()["frequencies"]
-    imaginary = bool(np.min(freqs) < -params["imaginary_tol_THz"])
+    stats = _frequency_stats(phonon.get_mesh_dict(), params["imaginary_tol_THz"])
+    stats["supercell_matrix"] = [int(n) for n in np.diag(smat)]
+    stats["n_atoms_supercell"] = len(phonon.supercell)
+    stats["n_displacements"] = len(phonon.supercells_with_displacements)
 
-    return temps, f_per_atom, s_per_atom, imaginary, n_prim, e_static
+    return temps, f_per_atom, s_per_atom, stats, n_prim, e_static
+
+
+def _frequency_stats(mesh_dict, tol):
+    """Dynamical-stability summary of a phonopy mesh.
+
+    Imaginary modes show up as negative frequencies. The three acoustic modes
+    at Gamma are exactly zero up to numerical noise, so a Gamma q-point (if the
+    mesh contains one) is left out; elsewhere a mode below ``-tol`` THz counts.
+    """
+    qpoints = np.asarray(mesh_dict["qpoints"], dtype=float)
+    freqs = np.asarray(mesh_dict["frequencies"], dtype=float)   # (n_q, n_bands)
+    off_gamma = np.linalg.norm(qpoints, axis=1) > 1e-8
+    if not off_gamma.any():
+        off_gamma[:] = True
+    f = freqs[off_gamma]
+    n_imag = int(np.sum(np.any(f < -tol, axis=1)))
+    return {
+        "imaginary": bool(n_imag > 0),
+        "min_frequency_THz": round(float(np.min(f)), 4),
+        "max_frequency_THz": round(float(np.max(freqs)), 4),
+        "n_imaginary_qpoints": n_imag,
+        "n_qpoints": int(off_gamma.sum()),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -143,7 +168,7 @@ def qha_free_energy(atoms0, calc, params):
     relaxed, converged = tight_relax(atoms0, calc, params["fmax"], params["max_steps"])
 
     scales = params["volume_scales"]
-    Vs, E0s, Fmats, Smats, imaginary_any = [], [], [], [], False
+    Vs, E0s, Fmats, Smats, stats_all = [], [], [], [], []
     temps = None
     cell0 = relaxed.cell.array.copy()
 
@@ -152,12 +177,12 @@ def qha_free_energy(atoms0, calc, params):
         a.set_cell(cell0 * (s ** (1.0 / 3.0)), scale_atoms=True)
         if len(scales) > 1:
             a = relax_positions(a, calc, params["fmax"], params["max_steps"])
-        temps, f_per_atom, s_per_atom, imag, _, e_static = harmonic_free_energy(a, calc, params)
+        temps, f_per_atom, s_per_atom, stats, _, e_static = harmonic_free_energy(a, calc, params)
         Vs.append(a.get_volume() / len(a))   # volume per atom
         E0s.append(e_static)
         Fmats.append(f_per_atom)
         Smats.append(s_per_atom)
-        imaginary_any = imaginary_any or imag
+        stats_all.append(stats)
 
     Vs = np.asarray(Vs)
     E0s = np.asarray(E0s)
@@ -180,6 +205,9 @@ def qha_free_energy(atoms0, calc, params):
     # harmonic vibrational entropy at the (near-equilibrium) reference volume --
     # the quantity Fultz et al. measure as the vibrational entropy of ordering
     s_ref = Smats[ref_idx]
+    # stability is judged at the reference (equilibrium) volume; the QHA
+    # volumes only get a flag, since compressed/expanded cells may soften
+    stats_ref = stats_all[ref_idx]
     return {
         "temperatures": temps.tolist(),
         "E0_eV_per_atom": round(e0_ref, 6),
@@ -187,7 +215,16 @@ def qha_free_energy(atoms0, calc, params):
         "free_energy_correction_eV_per_atom": [round(float(x), 6) for x in correction],
         "entropy_kB_per_atom": [round(float(x), 6) for x in s_ref],
         "volume_per_atom_A3": [round(float(x), 4) for x in v_eq],
-        "imaginary_modes": imaginary_any,
+        "imaginary_modes": stats_ref["imaginary"],
+        "imaginary_modes_any_volume": any(st["imaginary"] for st in stats_all),
+        "min_frequency_THz": stats_ref["min_frequency_THz"],
+        "max_frequency_THz": stats_ref["max_frequency_THz"],
+        "n_imaginary_qpoints": stats_ref["n_imaginary_qpoints"],
+        "n_qpoints": stats_ref["n_qpoints"],
+        "supercell_matrix": stats_ref["supercell_matrix"],
+        "n_atoms_supercell": stats_ref["n_atoms_supercell"],
+        "n_displacements": stats_ref["n_displacements"],
+        "n_atoms": len(relaxed),
         "relax_converged": converged,
         "n_volumes": len(scales),
     }

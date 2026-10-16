@@ -226,6 +226,34 @@ class DBSynthesizability(Base):
         UniqueConstraint("structure_uuid", "synthesizability_model", name="_synthesizability_struct_model_uc"),
     )
 
+class DBPhonon(Base):
+    """MLIP phonon result for one *predicted* ML-selected bulk by one model
+    (written by PhononScreenWorkChain). One row per (structure_uuid,
+    phonon_model); joins to DBStructureVersion / DBSynthesizability on
+    structure_uuid. Materials Project bulks are never phononed. Nothing in the
+    pipeline filters on it."""
+    __tablename__ = "db_phonon"
+
+    id = Column(Integer, primary_key=True)
+    structure_uuid = Column(UUID(as_uuid=True), ForeignKey("db_structure.uuid", ondelete="CASCADE"), nullable=False)
+    composition = Column(String, nullable=False)
+    phonon_model = Column(String, nullable=False)                       # MLIP used for the force constants
+    source = Column(String, nullable=True)                              # DBStructureVersion.source (csp / generated)
+    status = Column(String, nullable=False)                             # ok / failed
+    dynamically_stable = Column(Boolean, nullable=True)                 # no imaginary modes at the reference volume
+    min_frequency_THz = Column(DOUBLE_PRECISION, nullable=True)         # negative = imaginary
+    n_imaginary_qpoints = Column(Integer, nullable=True)
+    e0 = Column(DOUBLE_PRECISION, nullable=True)                        # static energy, eV/atom (tight relax)
+    free_energy_300K = Column(DOUBLE_PRECISION, nullable=True)          # G(300 K) - E0, eV/atom
+    ehull = Column(DOUBLE_PRECISION, nullable=True)                     # snapshot from the ML selection
+    attributes = Column(JSONB, nullable=True)                           # T grid, G(T), S(T), V(T), supercell, params
+    ctime = Column(DateTime(timezone=True), server_default=func.now())
+    mtime = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("structure_uuid", "phonon_model", name="_phonon_struct_model_uc"),
+    )
+
 if __name__ == "__main__":
     engine = create_engine(DB_URL, echo=False)
     Base.metadata.create_all(engine)
