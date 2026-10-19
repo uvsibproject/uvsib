@@ -108,5 +108,6 @@ table once with `run_dir/create_tables.py`.
 ## Report
 
 `pipeline_report.phonon_for_bulk()` feeds the "Lattice dynamics" section and the
-"Phonons" entry in the pipeline metadata. Materials Project bulks are listed as
-not phononed.
+"Phonons" entry in the pipeline metadata, placed before the Synthesizability
+section. Only the predicted (CSP / generated) bulks with a phonon result are
+listed; the section is omitted when there are none.

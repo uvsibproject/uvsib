@@ -41,9 +41,11 @@ R_J_PER_K_MOL = 8.314462618       # gas constant; phonopy entropy [J/K/mol] / R 
 # --------------------------------------------------------------------------- #
 def to_ase(struct_dict):
     s = Structure.from_dict(struct_dict)
+    cell, frac = s.lattice.matrix, s.frac_coords
+    if np.linalg.det(cell) < 0:          # left-handed -> swap a,b (phonopy needs det>0)
+        cell, frac = cell[[1, 0, 2]], frac[:, [1, 0, 2]]
     return Atoms(symbols=[str(site.specie) for site in s],
-                 scaled_positions=s.frac_coords,
-                 cell=s.lattice.matrix, pbc=True)
+                 scaled_positions=frac, cell=cell, pbc=True)
 
 
 def _phonopy_atoms(atoms):

@@ -674,6 +674,86 @@ def plot_bulk_comparison(summaries, ax_ehull=None, ax_eta=None):
     return ax_ehull, ax_eta
 
 
+# Human-readable names for (reaction, reaction_path), used in the report
+# title. Mirrors the pathway table on the platform's Reaction Pathways
+# documentation page; unknown pairs fall back to "REACTION / path".
+_PATHWAY_TITLES = {
+    "HER": {
+        "volmer_tafel": "Hydrogen evolution (Volmer–Tafel)",
+        "volmer_heyrovsky": "Hydrogen evolution (Volmer–Heyrovsky)",
+    },
+    "OER": {
+        "4e_mechanism": "Oxygen evolution (4e⁻ mechanism)",
+        "default": "Oxygen evolution (4e⁻ mechanism)",
+        "none": "Oxygen evolution (4e⁻ mechanism)",
+    },
+    "ORR": {
+        "4e_associative": "O₂ reduction to H₂O (4e⁻ associative)",
+        "4e_dissociative": "O₂ reduction to H₂O (4e⁻ dissociative)",
+        "2e_to_h2o2": "O₂ reduction to H₂O₂ (2e⁻)",
+    },
+    "CER": {
+        "volmer_tafel": "Chlorine evolution (Volmer–Tafel)",
+        "volmer_heyrovsky": "Chlorine evolution (Volmer–Heyrovsky)",
+        "krishtalik": "Chlorine evolution (Krishtalik)",
+    },
+    "CO2RR": {
+        "co2_to_co": "CO₂ reduction to CO",
+        "co2_to_hcooh": "CO₂ reduction to HCOOH",
+        "co_to_ch4": "CO reduction to CH₄",
+        "co_to_ch3oh": "CO reduction to CH₃OH",
+        "co2_to_ch4": "CO₂ reduction to CH₄",
+        "co2_to_ch3oh": "CO₂ reduction to CH₃OH",
+        "co2_to_c2h4": "CO₂ reduction to C₂H₄",
+    },
+    "NOXRR": {
+        "no_dissociative": "NO dissociation to N₂",
+        "no_to_nh3_noh": "NO reduction to NH₃ (via *NOH)",
+        "no_to_nh3_nhoh": "NO reduction to NH₃ (via *NHOH)",
+        "no_to_n2o": "NO reduction to N₂O",
+        "no2_to_no": "NO₂ reduction to NO",
+        "no3_to_nh3": "NO₃⁻ reduction to NH₃",
+        "no3_to_n2": "NO₃⁻ reduction to N₂",
+    },
+    "NRR": {
+        "distal": "N₂ reduction to NH₃ (distal)",
+        "alternating": "N₂ reduction to NH₃ (alternating)",
+        "dissociative": "N₂ reduction to NH₃ (dissociative)",
+    },
+}
+
+
+def pathway_title(reaction, reaction_path):
+    """Readable name for (reaction, reaction_path), e.g. ("CO2RR",
+    "co2_to_hcooh") -> "CO₂ reduction to HCOOH"; "REACTION / path" if the
+    pair is not in ``_PATHWAY_TITLES``."""
+    rxn = (reaction or "").strip().upper()
+    rp = (reaction_path or "").strip().lower()
+    return _PATHWAY_TITLES.get(rxn, {}).get(rp) or f"{reaction} / {reaction_path}"
+
+
+# What each optical-screen gap model (``codes/files/electronic.py``) predicts:
+# key -> (model, training data, target gap). ``megnet_mfi``'s target is the
+# fidelity chosen at run time (``megnet_fidelity_label``), so it is None here.
+_GAP_MODEL_INFO = {
+    "megnet_mfi": ("MEGNet multi-fidelity", None, None),
+    "alignn_pbe": ("ALIGNN", "Materials Project", "PBE"),
+    "alignn_mbj": ("ALIGNN", "JARVIS-DFT", "TBmBJ"),
+}
+
+
+def _gap_model_targets(electronic):
+    """``[(key, model, training data, target gap), ...]`` for the gap models
+    that ran on this bulk (``electronic`` = its ``band_info`` blob)."""
+    out = []
+    for key in electronic.get("gap_models") or []:
+        model, data, target = _GAP_MODEL_INFO.get(key, (key, None, None))
+        if key == "megnet_mfi":
+            target = electronic.get("megnet_fidelity_label")
+        out.append((key, model, data, target))
+    return out
+
+
 def _reaction_couple(reaction, reaction_path):
     """The redox couple (``{"role","u_red","u_ox","label"}``) the band gap must
     straddle for this (reaction, reaction_path), or ``None``. Lazily imports
@@ -1323,6 +1403,14 @@ def _uncertainty_methods(meta):
     return [meta["primary"]] + [m["model"] for m in meta.get("committee", [])]
 
 
+def _join_names(names):
+    """"A", "A and B", "A, B, and C"."""
+    names = list(names)
+    if len(names) <= 2:
+        return " and ".join(names)
+    return ", ".join(names[:-1]) + ", and " + names[-1]
+
+
 def _stability_badge(unc, esc):
     """Colored label for one bulk's committee verdict (``&mdash;`` if none)."""
     if not unc:
@@ -1362,33 +1450,40 @@ _PHONON_SOURCE_NAMES = {"csp": "CSP", "generated": "generated"}
 
 def _phonon_section(summaries, esc):
     """``(html, models_label)`` for the "Lattice dynamics" block -- one row
-    per (bulk, model) from ``summary["phonon"]``. ``("", None)`` when
-    PhononScreenWorkChain wrote nothing for this composition. Materials
-    Project bulks are never phononed, so they are listed as such."""
-    if not any(s.get("phonon") for s in summaries):
-        return "", None
+    per (bulk, model) from ``summary["phonon"]``, for the predicted (CSP /
+    generated) bulks only; bulks without a phonon result are not listed.
+    ``("", None)`` when there is nothing to show."""
+    def shown(results):
+        return [r for r in results or [] if r.get("source") in _PHONON_SOURCE_NAMES]
 
-    results_all = [r for s in summaries for r in s.get("phonon") or []]
-    models = sorted({r["model"] for r in results_all})
+    results_all = [r for s in summaries for r in shown(s.get("phonon"))]
+    if not results_all:
+        return "", None
+    def model_head(r):
+        return _model_label(r["model"], (r.get("attributes") or {}).get("head"))
+
+    models = sorted({model_head(r) for r in results_all})
     show_model = len(models) > 1
-    n_cols = 7 + show_model
+
+    params = next(((r.get("attributes") or {}).get("run_params") for r in results_all
+                   if (r.get("attributes") or {}).get("run_params")), None) or {}
+    tol = params.get("imaginary_tol_THz")
+    tol_txt = f"{tol:g}" if tol is not None else "tol"
+    mesh = params.get("mesh")
+    mesh_txt = f"{mesh}&times;{mesh}&times;{mesh}" if mesh else "uniform"
+    n_vol = len(params.get("volume_scales") or [1.0])
+    qha = n_vol > 1
+    # fixed-volume harmonic -> Helmholtz F; only the QHA minimisation over V
+    # at P = 0 gives a Gibbs free energy
+    fe_sym = "&Delta;G<sub>QHA</sub>" if qha else "F<sub>vib</sub>"
 
     rows = []
+    n_flagged = 0
     for s in summaries:
         uid = s["structure_uuid"]
         b = s["bulk"]
         ehull_cell = f'{b["ehull"]:.4f}' if b else "&mdash;"
-        results = s.get("phonon") or []
-        if not results:
-            source = (b or {}).get("source") or ""
-            why = ("Materials Project structure &mdash; not phononed"
-                   if source.startswith("MPDB") else "not phononed")
-            rows.append(
-                f'<tr class="border-t"><td class="px-4 py-3 font-mono text-xs" title="{esc(uid)}">{esc(uid[:8])}</td>'
-                f'<td class="px-4 py-3">{ehull_cell}</td>'
-                f'<td class="px-4 py-3 text-slate-400 italic" colspan="{n_cols - 2}">{why}</td></tr>')
-            continue
-        for r in results:
+        for r in shown(s.get("phonon")):
             attrs = r.get("attributes") or {}
             if r.get("status") != "ok":
                 verdict = ('<span class="px-2 py-0.5 rounded bg-slate-100 text-slate-600 text-xs font-bold">'
@@ -1405,6 +1500,11 @@ def _phonon_section(summaries, esc):
             imag_cell = f"{n_imag} / {n_q}" if n_imag is not None and n_q else "&mdash;"
             f300 = r.get("free_energy_300K")
             f300_cell = f"{f300 * 1000:.1f}" if f300 is not None else "&mdash;"
+            if f300 is not None and r.get("status") == "ok" and not r.get("dynamically_stable"):
+                n_flagged += 1
+                f300_cell = (f'<span class="text-slate-400" title="Imaginary modes were left out of the '
+                             f'sum (contribute zero); not a meaningful free energy of this configuration">'
+                             f'{f300_cell}&dagger;</span>')
             sc = attrs.get("supercell_matrix")
             sc_cell = ("&times;".join(str(n) for n in sc)
                        + (f' <span class="text-slate-400">({attrs.get("n_atoms_supercell")} at.)</span>'
@@ -1415,7 +1515,7 @@ def _phonon_section(summaries, esc):
                      f'<td class="px-4 py-3">{ehull_cell}</td>',
                      f'<td class="px-4 py-3">{esc(_PHONON_SOURCE_NAMES.get(r.get("source"), r.get("source") or ""))}</td>']
             if show_model:
-                cells.append(f'<td class="px-4 py-3">{esc(r["model"])}</td>')
+                cells.append(f'<td class="px-4 py-3">{esc(model_head(r))}</td>')
             cells += [f'<td class="px-4 py-3">{verdict}</td>',
                       f'<td class="px-4 py-3">{fmin_cell}</td>',
                       f'<td class="px-4 py-3">{imag_cell}</td>',
@@ -1428,17 +1528,81 @@ def _phonon_section(summaries, esc):
     if show_model:
         headers.append("Model")
     headers += ["Verdict", "Lowest &nu; (THz)", "Imag. q-points",
-                "F<sub>vib</sub>(300 K) (meV/atom)", "Supercell"]
+                f"{fe_sym}(300 K) (meV/atom)", "Supercell"]
     header_html = "".join(f'<th class="px-4 py-3">{h}</th>' for h in headers)
 
-    params = next(((r.get("attributes") or {}).get("run_params") for r in results_all
-                   if (r.get("attributes") or {}).get("run_params")), None) or {}
-    tol = params.get("imaginary_tol_THz")
-    tol_bit = (f" A mode below &minus;{tol:g} THz away from &Gamma; counts as imaginary."
+    tol_bit = (f" A mode below &minus;{tol_txt} THz away from &Gamma; counts as imaginary."
                if tol is not None else "")
-    n_vol = len(params.get("volume_scales") or [1.0])
-    method_bit = ("harmonic approximation at the relaxed volume" if n_vol == 1
-                  else f"quasi-harmonic approximation over {n_vol} volumes")
+    method_bit = (f"quasi-harmonic approximation over {n_vol} volumes" if qha
+                  else "harmonic approximation at the fixed, relaxed volume")
+    if qha:
+        fe_def = ("is the quasi-harmonic Gibbs free-energy correction G(300 K) &minus; E<sub>0</sub>, "
+                  "with G(T) = min<sub>V</sub> [E<sub>0</sub>(V) + F<sub>vib</sub>(V, T)] at P = 0 "
+                  "(includes zero-point energy and the static-energy change from thermal expansion)")
+    else:
+        fe_def = ("is the harmonic Helmholtz vibrational free energy at fixed volume, "
+                  "F<sub>vib</sub>(300 K) = F(300 K) &minus; E<sub>0</sub>, including the zero-point "
+                  "energy. No volume relaxation is done, so this is a Helmholtz, not a Gibbs, free energy")
+    min_len = params.get("min_supercell_length")
+    min_len_bit = f", at least {min_len:g} &Aring; along each axis (at most 3&times;)" if min_len else ""
+    model_def = ("""
+                <div>
+                  <dt class="font-semibold text-slate-900">Model</dt>
+                  <dd>MLIP used for the phonon forces.</dd>
+                </div>""" if show_model else "")
+    column_notes = f"""
+              <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-xs text-slate-600 mt-5">
+                <div>
+                  <dt class="font-semibold text-slate-900">Bulk / E<sub>hull</sub> / Source</dt>
+                  <dd>Bulk structure id, its ML-predicted energy above the convex hull (eV/atom), and
+                    where it came from (CSP: crystal structure prediction; generated: ML-generated).</dd>
+                </div>{model_def}
+                <div>
+                  <dt class="font-semibold text-slate-900">Verdict</dt>
+                  <dd><em>dynamically stable</em>: no imaginary mode anywhere on the q-point mesh
+                    (Lowest &nu; &ge; &minus;{tol_txt} THz). <em>imaginary modes</em>: at least one q-point has
+                    an imaginary mode, so the structure is a saddle point of the MLIP energy surface and would
+                    lower its energy by distorting along that mode. <em>failed</em>: the phonon calculation did
+                    not finish (the error is shown under Supercell).</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Lowest &nu; (THz)</dt>
+                  <dd>Lowest phonon frequency over the mesh, with &Gamma; left out (its three acoustic
+                    modes are zero up to numerical noise). Imaginary frequencies are shown as negative
+                    numbers, following phonopy: &minus;2.0 means 2.0i THz. The more negative the value, the
+                    stronger the instability.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Imag. q-points</dt>
+                  <dd><em>n</em> / <em>N</em>: of the <em>N</em> symmetry-irreducible q-points of the
+                    {mesh_txt} sampling mesh (&Gamma; excluded), <em>n</em> have at least one branch below
+                    &minus;{tol_txt} THz. It counts q-points, not modes, and each irreducible point counts once
+                    whatever its weight, so it shows <em>how widespread</em> the instability is, not the fraction
+                    of the Brillouin-zone volume. A few unstable points near &Gamma; often come from numerical
+                    noise or a too-small supercell; many points, or zone-boundary points, point to a real
+                    instability such as a lattice distortion or a cell doubling.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">{fe_sym}(300 K) (meV/atom)</dt>
+                  <dd>{fe_sym}(300 K) {fe_def}. Per atom, at 300 K.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Supercell</dt>
+                  <dd>Diagonal supercell used for the finite displacements{min_len_bit}, and its atom
+                    count. Force constants beyond half the supercell are cut off, so a small supercell can
+                    give spurious imaginary modes.</dd>
+                </div>
+              </dl>"""
+    flag_note = (f"""
+              <p class="text-xs text-slate-600 mt-4">
+                <strong>&dagger; Structures with imaginary modes.</strong> The harmonic free energy is only
+                defined for real frequencies. phonopy computes {fe_sym} by summing over modes with
+                &nu; &gt; 0 and leaves the imaginary modes out (they contribute zero; the sum is not
+                rescaled for the missing modes). The value shown is therefore not a free energy of that
+                configuration and should not be compared with the dynamically stable structures. A
+                meaningful value would need the structure to be relaxed along the unstable mode first, or an
+                anharmonic treatment.
+              </p>""" if n_flagged else "")
 
     html = f"""
         <section>
@@ -1453,8 +1617,7 @@ def _phonon_section(summaries, esc):
                 <strong>predicted</strong> bulks that passed the E<sub>above hull</sub> screen;
                 Materials Project structures are not recomputed. Imaginary modes mean the
                 structure is a saddle point, not a minimum, of the MLIP energy surface.{tol_bit}
-                <strong>F<sub>vib</sub>(300 K)</strong> is the vibrational free-energy correction
-                G(300 K) &minus; E<sub>0</sub>.
+                <strong>{fe_sym}(300 K)</strong> {fe_def}.
               </p>
               <p class="text-xs text-slate-500">
                 No structure is removed on this basis.
@@ -1467,10 +1630,19 @@ def _phonon_section(summaries, esc):
                 </thead>
                 <tbody>{"".join(rows)}</tbody>
               </table>
-            </div>
+            </div>{flag_note}{column_notes}
           </div>
         </section>"""
     return html, ", ".join(models)
+
+
+_SOURCE_LABELS = {"MPDB_exp": "MPDB(exp.)", "MPDB_stb": "MPDB(stb.)", "csp": "CSP"}
+
+
+def _source_label(source):
+    """Display name of a ``DBStructureVersion.source`` in the stable-bulks
+    table; sources without an entry are shown as stored."""
+    return _SOURCE_LABELS.get(source, source)
 
 
 def _uncertainty_section(summaries, esc):
@@ -1903,12 +2075,14 @@ def _surface_adsorption_section(summaries, esc):
               <div>
                 <h3 class="font-semibold text-slate-900 mb-1">What was compared</h3>
                 <p>
-                  The facets, adsorption candidates and overpotentials in this report come from
-                  <strong>{p}</strong>. A committee of {committee_bit} re-evaluates the same
-                  {p}-relaxed slabs, adsorbate systems and gas references by single points, and each model
-                  computes &gamma; and &eta; on its own energies. The table asks whether the screening
+                  <strong>{p}</strong> is used to generate and relax the bulk and surface structures, identify
+                  adsorption candidates, and select the best reaction candidate. {committee_bit} then evaluate the
+                  same {p}-relaxed slabs, adsorbate systems and gas references by single points, and each model
+                  computes &gamma; and &eta; on its own energies.
+                  The table asks whether the screening
                   conclusions would change under another model. The spread measures disagreement between
                   MLIPs; it is not an error bar calibrated against DFT.
+                  We compare the models in three ways:
                 </p>
               </div>
               <div class="grid gap-3 md:grid-cols-2">
@@ -2090,6 +2264,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
     couple = _reaction_couple(reaction, reaction_path)
     n_light = 0
     screen_models = screen_fidelity = None
+    screen_targets = []
     for s in summaries:
         e = s.get("electronic")
         if not e:
@@ -2097,6 +2272,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
         if screen_models is None:
             screen_models = ", ".join(e.get("gap_models") or []) or None
             screen_fidelity = e.get("megnet_fidelity_label")
+            screen_targets = _gap_model_targets(e)
         verdict = bulk_straddle(e, reaction, reaction_path)
         if verdict and verdict.get("straddles"):
             n_light += 1
@@ -2132,7 +2308,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
     for s in summaries:
         b, uid = s["bulk"], s["structure_uuid"]
         if b:
-            ehull_cell, source_cell = _ehull_with_spread(b, esc), esc(b["source"])
+            ehull_cell, source_cell = _ehull_with_spread(b, esc), esc(_source_label(b["source"]))
         else:
             ehull_cell = source_cell = "&mdash;"
         e = s.get("electronic") or {}
@@ -2153,6 +2329,48 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                     <td class="px-6 py-4">{gap_cell}</td>
                   </tr>""")
 
+    # -- bulk-table notes: model names come from this run's data --------------
+    unc_meta = next((s["bulk"]["uncertainty_meta"] for s in summaries
+                     if s["bulk"] and s["bulk"].get("uncertainty_meta")), None)
+    if unc_meta:
+        ehull_models = _uncertainty_methods(unc_meta)
+        ehull_note = (f"The central value is the {esc(ehull_models[0])} prediction. The &plusmn; value "
+                      f"is the standard deviation across {esc(_join_names(ehull_models))}. It represents "
+                      "disagreement between these models, not an uncertainty interval calibrated "
+                      "against DFT.")
+    else:
+        by_model = f" by {esc(model)}" if model else ""
+        ehull_note = (f"ML-predicted energy above the convex hull{by_model}; no committee "
+                      "spread is available for this run.")
+    bulk_notes = f"""
+              <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-xs text-slate-600">
+                <div>
+                  <dt class="font-semibold text-slate-900">Source</dt>
+                  <dd><em>MPDB(exp.)</em>: experimentally observed structures retrieved from the Materials
+                    Project database. <em>MPDB(stb.)</em>: structures retrieved from the Materials Project
+                    database as computationally stable. <em>CSP</em>: structures from crystal structure
+                    prediction. <em>generated</em>: structures generated by ML models.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">E above hull (eV/atom)</dt>
+                  <dd>{ehull_note}</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Surfaces retained</dt>
+                  <dd>Number of surface slab models generated and retained for this bulk structure.
+                    Different slabs may represent different orientations or surface configurations. A value
+                    of zero means that no surface candidates were retained by the workflow; it does not
+                    establish that the material has no stable physical surfaces.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Gap (eV)</dt>
+                  <dd>Predicted electronic band gap in eV. The &plusmn; value represents the spread between
+                    the band-gap models{f" ({esc(screen_models)})" if screen_models else ""}, not a calibrated
+                    confidence interval. The band-gap models and the target quantity used to train them are
+                    described in the <em>Light Harvesting</em> section.</dd>
+                </div>
+              </dl>"""
+
     # -- per-bulk sections: surfaces table + reaction-path FED grid ------
     bulk_sections = []
     for s in summaries:
@@ -2162,7 +2380,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
             unc = b["uncertainty"]
             ehull_bit += (f' (committee {unc["ehull_min"]:.3f}&ndash;{unc["ehull_max"]:.3f}, '
                           f'{_stability_badge(unc, esc)})')
-        source_bit = esc(b["source"]) if b else "&mdash;"
+        source_bit = esc(_source_label(b["source"])) if b else "&mdash;"
         mp_id_bit = f' &nbsp;|&nbsp; MP ID: {mp_id_cell(b)}' if (b and mp_id_cell(b) != "&mdash;") else ""
 
         surface_rows = []
@@ -2265,8 +2483,99 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
           {fed_block}
         </div>""")
 
+    # -- per-bulk surface-table terms, explained once under the section title --
+    surf_meta_any = next((s.get("surface_uncertainty_meta") for s in summaries
+                          if s.get("surface_uncertainty_meta")
+                          and any(surf.get("uncertainty") for surf in s["surfaces"])), None)
+    surf_primary = (surf_meta_any or {}).get("primary") or surface_model or "the primary model"
+    if surf_meta_any:
+        surf_order = " / ".join([surf_meta_any["primary"]]
+                                + [m["model"] for m in surf_meta_any.get("committee", [])])
+        spread_bit = ", with the cross-model spread (&plusmn;, standard deviation; hover for per-model values)"
+        eta_spread_bit = (", with the spread across models (&plusmn;) for that same candidate; the chips "
+                          "show whether the spread is within tolerance, whether the potential-determining "
+                          "step (PDS) is the same under every model, and the geometry sensitivity")
+        unc_terms = f"""
+                <div>
+                  <dt class="font-semibold text-slate-900">&gamma; rank</dt>
+                  <dd>Rank of the surface-energy candidate within this bulk, in the order {esc(surf_order)}
+                    (1 = lowest &gamma;).</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">&gamma; checks</dt>
+                  <dd>Surface-energy ranking agreement (<em>rank: same</em> / <em>differs</em> across models)
+                    and the geometry-sensitivity status (<em>geometry: low</em> / <em>sensitive</em>, a heuristic
+                    from the other models' residual forces on the {esc(surf_primary)} geometries).</dd>
+                </div>"""
+    else:
+        spread_bit = eta_spread_bit = unc_terms = ""
+    per_bulk_terms = f"""
+          <div class="rounded-xl border bg-white p-6">
+            <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-xs text-slate-600">
+                <div>
+                  <dt class="font-semibold text-slate-900">Surface ID</dt>
+                  <dd>Internal identifier for the generated slab or surface candidate.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Miller Index</dt>
+                  <dd>Crystallographic orientation of the surface, expressed as (hkl).</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Surface Energy (eV/&Aring;&sup2;)</dt>
+                  <dd>Energy per unit surface area, &gamma;, reported for {esc(surf_primary)}{spread_bit}.
+                    Lower values indicate lower calculated surface energy under the stated model and slab
+                    conventions.</dd>
+                </div>{unc_terms}
+                <div>
+                  <dt class="font-semibold text-slate-900"># Atoms</dt>
+                  <dd>Number of atoms in the clean slab on which the best candidate was computed: the stored
+                    1&times;1 slab's atom count multiplied by n<sub>x</sub>&middot;n<sub>y</sub> of that
+                    candidate's Repeat. It includes the supercell scaling and excludes the adsorbate atoms.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Area (&Aring;&sup2;)</dt>
+                  <dd>Surface area of the same slab configuration, scaled in the same way
+                    (1&times;1 area &times; n<sub>x</sub>&middot;n<sub>y</sub>).</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Best &eta;</dt>
+                  <dd>Overpotential of the {esc(surf_primary)}-selected best (lowest-&eta;) candidate for this
+                    surface{eta_spread_bit}.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Repeat (n<sub>x</sub>, n<sub>y</sub>)</dt>
+                  <dd>In-plane repetition used to construct the clean slab on which the best adsorption
+                    candidate was placed.</dd>
+                </div>
+            </dl>
+          </div>"""
+
     best_eta_cell = f"{best_eta:.3f} V" if best_eta is not None else "&mdash;"
     n_light_cell = str(n_light) if electronic_present else "&mdash;"
+
+    # -- gap models: names for the Pipeline Metadata "Light Screen" entry, the
+    # model -> target-gap explanation for the Light Harvesting section ------
+    def target_txt(target):
+        return f"{esc(target)} gap" if target else "gap"
+
+    light_screen_cell = esc(screen_models) if electronic_present else "not run"
+    gap_models_note = ""
+    if electronic_present and screen_targets:
+        bits = []
+        for k, gap_model, data, t in screen_targets:
+            if k == "megnet_mfi":
+                bits.append(f"{esc(k)}: {esc(gap_model)} model trained jointly on band gaps at four levels of "
+                            "theory (PBE, GLLB-SC, HSE, SCAN; Chen et al. 2021); the level is chosen at prediction time"
+                            + (f", here {esc(t)} (the hybrid HSE06 functional)" if t == "HSE" else
+                               (f", here {esc(t)}" if t else "")))
+            else:
+                bits.append(f"{esc(k)}: {esc(gap_model)} trained on {esc(data) if data else 'its'} "
+                            f"{target_txt(t)}s")
+        gap_models_note = (
+            ". ".join(bits) + ". "
+            + ("The HSE label belongs to megnet_mfi only. " if screen_fidelity and len(screen_targets) > 1 else "")
+            + ("The reported gap is the plain mean of these models, so it mixes their target "
+               "quantities; &plusmn; is their spread. " if len(screen_targets) > 1 else ""))
 
     # -- light-harvesting section (only when the optical screen ran) ---------
     if electronic_present:
@@ -2282,6 +2591,10 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
             gap, gap_std = e.get("gap_eV"), e.get("gap_std_eV")
             gap_cell = "&mdash;" if gap is None else (
                 f'{gap:.2f} &plusmn; {gap_std:.2f}' if gap_std else f'{gap:.2f}')
+            per_model = e.get("gap_values_eV") or {}
+            if gap is not None and per_model:
+                gap_title = " · ".join(f"{k} {v:.2f}" for k, v in per_model.items()) + " eV"
+                gap_cell = f'<span title="{esc(gap_title)}">{gap_cell}</span>'
             edges = e.get("band_edges_vs_rhe_V") or {}
             cb_cell = f'{edges["cb"]:.2f}' if "cb" in edges else "&mdash;"
             vb_cell = f'{edges["vb"]:.2f}' if "vb" in edges else "&mdash;"
@@ -2306,6 +2619,58 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                       </tr>""")
 
         couple_bit = esc(couple["label"]) if couple else "&mdash;"
+        gap_models_txt = (", ".join(f"{esc(k)} &rarr; {target_txt(t)}" for k, _, _, t in screen_targets)
+                          or esc(screen_models))
+        margin_req = next((v["margin_required_V"] for s in summaries
+                           for v in [bulk_straddle(s.get("electronic"), reaction, reaction_path)]
+                           if v and v.get("margin_required_V") is not None), None)
+        margin_txt = f"{margin_req:g} V" if margin_req is not None else "the required margin"
+        light_notes = f"""
+              <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-xs text-slate-600 mt-5">
+                <div>
+                  <dt class="font-semibold text-slate-900">Bulk</dt>
+                  <dd>Bulk structure id (first 8 characters; hover for the full UUID).
+                    <em>not screened</em>: the optical screen produced no result for this bulk.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Gap (eV)</dt>
+                  <dd>Mean of the ML-predicted band gaps ({gap_models_txt}). &plusmn; is the standard deviation
+                    over these models (for two models, half their difference): model disagreement, not a
+                    calibrated confidence interval. Hover for the per-model values.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Straddle</dt>
+                  <dd><em>straddles</em>: both Red. margin and Ox. margin are at least {margin_txt}.
+                    <em>no</em>: at least one edge falls short (hover for both margins).</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">E<sub>CB</sub> / E<sub>VB</sub> (V<sub>RHE</sub>)</dt>
+                  <dd>Estimated conduction- and valence-band edges as electrochemical potentials:
+                    E<sub>CB</sub> = &chi; &minus; 4.5 eV &minus; E<sub>g</sub>/2 and E<sub>VB</sub> = E<sub>CB</sub> + E<sub>g</sub>,
+                    with &chi; the geometric-mean Mulliken electronegativity of the composition and
+                    E<sub>g</sub> the Gap column. On this scale a more negative value is a higher-lying
+                    (more reducing) level. &chi; depends on composition only, so polymorphs differ only through
+                    their gap.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Req. min gap (eV)</dt>
+                  <dd>Smallest gap that could straddle at all: the width of the redox window plus
+                    {margin_txt} on each side, (U<sub>ox</sub> &minus; U<sub>red</sub>) + 2&times;margin. A bulk
+                    with a smaller gap cannot straddle, wherever its edges sit.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Red. margin (V)</dt>
+                  <dd>U<sub>red</sub> &minus; E<sub>CB</sub>: how far the conduction-band edge sits above
+                    (more negative than) the reduction level. Must be &ge; {margin_txt}; negative means the edge
+                    is too low to drive the reduction half-reaction.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Ox. margin (V)</dt>
+                  <dd>E<sub>VB</sub> &minus; U<sub>ox</sub>: how far the valence-band edge sits below
+                    (more positive than) the oxidation level. Must be &ge; {margin_txt}; negative means the edge
+                    is too high to drive the oxidation half-reaction.</dd>
+                </div>
+              </dl>"""
 
         light_section = f"""
         <section>
@@ -2332,11 +2697,16 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 straddle at all, <em>(U<sub>ox</sub> &minus; U<sub>red</sub>) + 2&times;margin</em>.
               </p>
               <p class="text-xs text-slate-500">
-                Gap from pretrained ML models ({esc(screen_models)}); edges from the
-                empirical Butler&ndash;Ginley / Mulliken relation (E<sub>e</sub> = 4.5 eV),
-                V vs RHE &mdash; treat the edges as &plusmn;0.3&ndash;0.5 eV and use this to
-                rank, not to decide.
+                Gap from pretrained ML models ({gap_models_txt}). {gap_models_note}Edges from the
+                empirical Butler&ndash;Ginley / Mulliken relation (E<sub>e</sub> = 4.5 eV), V vs RHE.
               </p>
+            </div>
+            <div class="border-l-4 border-amber-500 bg-amber-50 text-amber-900 text-sm rounded-r-lg p-4 mb-3">
+              <strong>Screening limitation:</strong> Band gaps are ML predictions, and band edges are
+              estimated using an empirical relation rather than calculated directly for each structure
+              using a consistent electronic-structure method. The band-edge estimates have an expected
+              uncertainty of approximately 0.3&ndash;0.5 eV and should be used to rank candidates, not
+              establish photocatalytic feasibility.
             </div>
             <div class="overflow-x-auto border rounded-lg">
               <table class="w-full text-sm text-left text-slate-700">
@@ -2354,7 +2724,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 </thead>
                 <tbody>{"".join(light_rows)}</tbody>
               </table>
-            </div>
+            </div>{light_notes}
           </div>
         </section>"""
     else:
@@ -2384,13 +2754,26 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
     else:
         robust_tile = ""
     summary_cols = f"md:grid-cols-{5 + bool(unc_present) + bool(analysed_candidates)}"
+    summary_note = (
+        "<em>Bulk candidates</em>: relaxed bulk structures screened for this run. "
+        "<em>Surfaces retained</em>: slabs kept after relaxation (non-converged slabs dropped), "
+        "summed over all bulks. <em>Reaction candidates</em>: adsorption configurations "
+        "(facet, site, coverage) with &eta; &le; 2.0 V. <em>Lowest predicted &eta;</em>: the smallest "
+        "ML-predicted overpotential over all candidates. <em>Light-viable</em>: bulks whose predicted band gap "
+        f"straddles the {esc(reaction)} redox couple with margin."
+    )
+    if unc_present:
+        summary_note += " <em>Robust bulks</em>: stable under every committee MLIP."
+    if analysed_candidates:
+        summary_note += (" <em>Robust candidates</em>: same potential-determining step and "
+                         "&sigma;<sub>&eta;</sub> within tolerance under every committee MLIP.")
 
     html_doc = f"""<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>{esc(chemical_formula)} &mdash; {esc(reaction)} / {esc(reaction_path)}</title>
+    <title>{esc(chemical_formula)} &mdash; {esc(pathway_title(reaction, reaction_path))}</title>
 
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -2402,12 +2785,9 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
   <body class="flex flex-col min-h-screen bg-slate-50">
     <div class="bg-white border-b px-6 py-6 sticky top-0 z-10">
       <div class="max-w-screen-2xl mx-auto flex flex-col gap-2">
-        <h1 class="text-slate-900 text-2xl font-bold tracking-tight">
-          {esc(chemical_formula)} &mdash; {esc(reaction)} / {esc(reaction_path)}
+        <h1 class="text-slate-900 text-2xl font-bold tracking-tight" title="{esc(reaction)} / {esc(reaction_path)}">
+          {esc(chemical_formula)} &mdash; {esc(pathway_title(reaction, reaction_path))}
         </h1>
-        <p class="text-slate-500 text-sm">
-          PhaseDiagramMLWorkChain &rarr; SurfaceBuilderWorkChain &rarr; AdsorbatesWorkChain
-        </p>
       </div>
     </div>
 
@@ -2426,7 +2806,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 <p class="text-lg font-bold text-slate-900">{n_bulks}</p>
               </div>
               <div class="p-3 rounded-xl bg-slate-50 border border-slate-100">
-                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Surfaces Found</p>
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Surfaces Retained</p>
                 <p class="text-lg font-bold text-slate-900">{n_surfaces}</p>
               </div>
               <div class="p-3 rounded-xl bg-slate-50 border border-slate-100">
@@ -2434,7 +2814,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 <p class="text-lg font-bold text-slate-900">{n_candidates}</p>
               </div>
               <div class="p-3 rounded-xl bg-slate-50 border border-slate-100">
-                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Best &eta;</p>
+                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Lowest Predicted &eta;</p>
                 <p class="text-lg font-bold text-slate-900">{best_eta_cell}</p>
               </div>
               <div class="p-3 rounded-xl bg-slate-50 border border-slate-100" title="Bulks whose ML band gap straddles this reaction's redox couple with margin">
@@ -2442,13 +2822,14 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 <p class="text-lg font-bold text-slate-900">{n_light_cell}</p>
               </div>{robust_tile}{robust_candidates_tile}
             </div>
+            <p class="text-xs text-slate-600 mt-4">{summary_note}</p>
           </div>
         </section>
 
         <section>
           <div class="flex items-center gap-2 mb-4">
             <i data-lucide="layers" class="w-5 h-5 text-primary"></i>
-            <h2 class="text-xl font-bold text-slate-900">Stable Bulk Structures</h2>
+            <h2 class="text-xl font-bold text-slate-900">Bulk Structure Candidates</h2>
           </div>
           <div class="bg-white border rounded-xl overflow-hidden">
             <div class="overflow-x-auto">
@@ -2456,24 +2837,26 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
                   <tr>
                     <th class="px-6 py-3">UUID</th>
-                    <th class="px-6 py-3">Source</th>
+                    <th class="px-6 py-3" title="MPDB(exp.): experimentally observed, Materials Project · MPDB(stb.): stable, Materials Project · CSP: crystal structure prediction · generated: ML-generated">Source</th>
                     <th class="px-6 py-3" title="Materials Project id (MPDB-sourced bulks only)">MP ID</th>
-                    <th class="px-6 py-3">E above hull (eV/atom)</th>
-                    <th class="px-6 py-3">Surfaces</th>
+                    <th class="px-6 py-3" title="± = standard deviation across the MLIP committee (model disagreement, not a DFT-calibrated interval)">E above hull (eV/atom)</th>
+                    <th class="px-6 py-3" title="Surface slab models retained for this bulk; 0 does not mean the material has no stable surfaces">Surfaces retained</th>
                     <th class="px-6 py-3" title="ML-predicted band gap; &plusmn; is the model spread">Gap (eV)</th>
                   </tr>
                 </thead>
                 <tbody>{"".join(bulk_rows) or f'<tr><td colspan="6" class="px-6 py-4 text-slate-400 italic">no bulk candidates found</td></tr>'}</tbody>
               </table>
             </div>
+            <div class="border-t bg-slate-50 px-6 py-4">{bulk_notes}
+            </div>
           </div>
         </section>
 
         {uncertainty_section}
 
-        {synth_section}
-
         {phonon_section}
+
+        {synth_section}
 
         {light_section}
 
@@ -2483,7 +2866,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
           <div class="flex items-center gap-2">
             <i data-lucide="bar-chart-3" class="w-5 h-5 text-primary"></i>
             <h2 class="text-xl font-bold text-slate-900">Per-Bulk Detail: Surfaces &amp; Reaction Paths</h2>
-          </div>
+          </div>{per_bulk_terms}
           {"".join(bulk_sections)}
         </section>
 
@@ -2544,7 +2927,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
               </div>
               <div>
                 <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">Light Screen</p>
-                <p class="text-sm font-bold text-slate-900">{esc(screen_models) if electronic_present else "not run"}{f" &middot; {esc(screen_fidelity)}" if electronic_present and screen_fidelity else ""}</p>
+                <p class="text-sm font-bold text-slate-900">{light_screen_cell}</p>
               </div>
             </div>
             <div class="flex items-center gap-4">
@@ -2659,6 +3042,6 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                    f, indent=2, default=str)
 
     html_doc = _keep_unit_case(html_doc)
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(html_doc)
     return html_doc
