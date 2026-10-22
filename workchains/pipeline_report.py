@@ -1207,18 +1207,19 @@ def _synthesizability_section(summaries, esc):
             flag_rows[id(p)] = flags
     show_notes = any(flag_rows.values())
 
-    n_cols = 5 + show_model + 2 * per_row + show_notes
+    n_cols = 6 + show_model + 2 * per_row + show_notes
     rows = []
     for s in summaries:
         uid = s["structure_uuid"]
         b = s["bulk"]
         ehull_cell = f'{b["ehull"]:.4f}' if b else "&mdash;"
+        source_cell = esc(_source_label(b.get("source"))) if b else "&mdash;"
         predictions = s.get("synthesizability") or []
         if not predictions:
             rows.append(
                 f'<tr class="border-t"><td class="px-4 py-3 font-mono text-xs">{esc(uid[:8])}</td>'
-                f'<td class="px-4 py-3">{ehull_cell}</td>'
-                f'<td class="px-4 py-3 text-slate-400 italic" colspan="{n_cols - 2}">not screened</td></tr>')
+                f'<td class="px-4 py-3">{ehull_cell}</td><td class="px-4 py-3">{source_cell}</td>'
+                f'<td class="px-4 py-3 text-slate-400 italic" colspan="{n_cols - 3}">not screened</td></tr>')
             continue
         for p in predictions:
             score = p.get("score")
@@ -1233,7 +1234,8 @@ def _synthesizability_section(summaries, esc):
                 verdict_cell = "&mdash;"
             flags = flag_rows[id(p)]
             cells = [f'<td class="px-4 py-3 font-mono text-xs" title="{esc(uid)}">{esc(uid[:8])}</td>',
-                     f'<td class="px-4 py-3">{ehull_cell}</td>']
+                     f'<td class="px-4 py-3">{ehull_cell}</td>',
+                     f'<td class="px-4 py-3">{source_cell}</td>']
             if show_model:
                 cells.append(f'<td class="px-4 py-3">{esc(p["model"])}</td>')
             cells += [f'<td class="px-4 py-3">{score_cell}</td>',
@@ -1248,7 +1250,7 @@ def _synthesizability_section(summaries, esc):
             rows.append('\n                      <tr class="border-t align-top">'
                         + "".join(cells) + "</tr>")
 
-    headers = ["Bulk", "E<sub>hull</sub> (eV/atom)"]
+    headers = ["Bulk", "E<sub>hull</sub> (eV/atom)", "Source"]
     if show_model:
         headers.append("Model")
     headers += ["P(synth.)", "Verdict", "Uncertainty (bits)"]
@@ -1262,10 +1264,47 @@ def _synthesizability_section(summaries, esc):
                        if p.get("attributes")), None) or {}
     score_thr = thresholds.get("score")
     unc_thr = thresholds.get("uncertainty_bits")
-    thr_bit = ""
     if score_thr is not None and unc_thr is not None:
-        thr_bit = (f" Verdict: <em>synthesizable</em> if P &ge; {score_thr:g}, <em>uncertain</em> "
-                   f"if the entropy exceeds {unc_thr:g} bits.")
+        verdict_def = (f"<em>uncertain</em> if the uncertainty exceeds {unc_thr:g} bits; otherwise "
+                       f"<em>synthesizable</em> if P &ge; {score_thr:g} and <em>not synthesizable</em> below.")
+    else:
+        verdict_def = ("<em>synthesizable</em> / <em>not synthesizable</em> / <em>uncertain</em>, from P(synth.) "
+                       "and its uncertainty.")
+
+    def term(dt, dd):
+        return f"""
+              <div>
+                <dt class="font-semibold text-slate-900">{dt}</dt>
+                <dd>{dd}</dd>
+              </div>"""
+
+    column_notes = [term("Bulk / E<sub>hull</sub> / Source",
+                         """Bulk structure id, its ML-predicted energy above the convex hull (eV/atom), and
+                  where it came from (MPDB(exp.): experimentally observed structure from the Materials Project;
+                  MPDB(stb.): computationally stable structure from the Materials Project; CSP: crystal structure
+                  prediction; generated: ML-generated). Hover the pointer over a bulk id
+                  to see its full UUID.""")]
+    if show_model:
+        column_notes.append(term("Model", "Synthesizability model that made the prediction."))
+    column_notes += [
+        term("P(synth.)", "The model's probability (0&ndash;1) that the structure can be made experimentally."),
+        term("Verdict", verdict_def),
+        term("Uncertainty (bits)", "Binary entropy of P(synth.): 0 = confident, 1 bit = coin flip."),
+    ]
+    if per_row:
+        column_notes += [
+            term("Method", "Predicted synthesis method and its probability. Hover the pointer over a method to "
+                           "see the probabilities of all methods."),
+            term("Precursors", "Top-ranked precursor set, with lower-ranked sets below it. &#10003; / "
+                               "&#9888;&#xFE0E;: the set is element-checked against the target; hover the pointer "
+                               "over &#9888;&#xFE0E; to see what is missing or foreign."),
+        ]
+    if show_notes:
+        column_notes.append(term("Notes", "<em>precursors out of domain</em>: more elements than the precursor "
+                                          "model was validated on. <em>above E<sub>hull</sub> threshold</em>: kept "
+                                          "only because the phase diagram must return at least one bulk."))
+    column_notes_html = ('\n            <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-sm '
+                         'text-slate-600 mt-5">' + "".join(column_notes) + "\n            </dl>")
 
     composition_html = ""
     if not per_row:
@@ -1297,12 +1336,10 @@ def _synthesizability_section(summaries, esc):
           <div class="bg-white border rounded-xl p-6">
             <div class="border-l-4 border-primary bg-blue-50 text-slate-700 text-sm rounded-r-lg p-4 mb-5 space-y-2">
               <p>
-                Predicted for every bulk that passed the E<sub>above hull</sub> screen.
-                <strong>P(synth.)</strong> is the model's probability that the structure can be
-                made experimentally; <strong>uncertainty</strong> is its binary entropy
-                (0 = confident, 1 bit = coin flip).{thr_bit}{shared_note}
+                Predicted with {esc(", ".join(models))} for every bulk that passed the E<sub>above hull</sub> screen: whether
+                the structure can be made experimentally, and by which method and from which precursors.{shared_note}
               </p>
-              <p class="text-xs text-slate-500">
+              <p class="text-sm text-slate-500">
                 Advisory only &mdash; no structure is removed on this basis. Precursor sets are
                 element-checked against the target (&#10003; / &#9888;&#xFE0E;), not stoichiometry-balanced;
                 CSLLM's precursor model was validated on binary/ternary compounds, so larger systems
@@ -1311,12 +1348,12 @@ def _synthesizability_section(summaries, esc):
             </div>{composition_html}
             <div class="overflow-x-auto border rounded-lg">
               <table class="w-full text-sm text-left text-slate-700">
-                <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
+                <thead class="bg-slate-50 text-slate-500 text-xs">
                   <tr>{header_html}</tr>
                 </thead>
                 <tbody>{"".join(rows)}</tbody>
               </table>
-            </div>
+            </div>{column_notes_html}
           </div>
         </section>"""
     return html, ", ".join(models)
@@ -1449,7 +1486,7 @@ _PHONON_SOURCE_NAMES = {"csp": "CSP", "generated": "generated"}
 
 
 def _phonon_section(summaries, esc):
-    """``(html, models_label)`` for the "Lattice dynamics" block -- one row
+    """``(html, models_label)`` for the "Lattice Dynamics" block -- one row
     per (bulk, model) from ``summary["phonon"]``, for the predicted (CSP /
     generated) bulks only; bulks without a phonon result are not listed.
     ``("", None)`` when there is nothing to show."""
@@ -1550,12 +1587,15 @@ def _phonon_section(summaries, esc):
                   <dt class="font-semibold text-slate-900">Model</dt>
                   <dd>MLIP used for the phonon forces.</dd>
                 </div>""" if show_model else "")
+    fe_hover = (" Values marked &dagger; have imaginary modes left out of the sum; hover the pointer over "
+                "such a value for details." if n_flagged else "")
     column_notes = f"""
-              <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-xs text-slate-600 mt-5">
+              <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-sm text-slate-600 mt-5">
                 <div>
                   <dt class="font-semibold text-slate-900">Bulk / E<sub>hull</sub> / Source</dt>
                   <dd>Bulk structure id, its ML-predicted energy above the convex hull (eV/atom), and
-                    where it came from (CSP: crystal structure prediction; generated: ML-generated).</dd>
+                    where it came from (CSP: crystal structure prediction; generated: ML-generated). Hover the pointer over a bulk id
+                    to see its full UUID.</dd>
                 </div>{model_def}
                 <div>
                   <dt class="font-semibold text-slate-900">Verdict</dt>
@@ -1584,7 +1624,7 @@ def _phonon_section(summaries, esc):
                 </div>
                 <div>
                   <dt class="font-semibold text-slate-900">{fe_sym}(300 K) (meV/atom)</dt>
-                  <dd>{fe_sym}(300 K) {fe_def}. Per atom, at 300 K.</dd>
+                  <dd>{fe_sym}(300 K) {fe_def}. Per atom, at 300 K.{fe_hover}</dd>
                 </div>
                 <div>
                   <dt class="font-semibold text-slate-900">Supercell</dt>
@@ -1594,7 +1634,7 @@ def _phonon_section(summaries, esc):
                 </div>
               </dl>"""
     flag_note = (f"""
-              <p class="text-xs text-slate-600 mt-4">
+              <p class="text-sm text-slate-600 mt-4">
                 <strong>&dagger; Structures with imaginary modes.</strong> The harmonic free energy is only
                 defined for real frequencies. phonopy computes {fe_sym} by summing over modes with
                 &nu; &gt; 0 and leaves the imaginary modes out (they contribute zero; the sum is not
@@ -1608,7 +1648,7 @@ def _phonon_section(summaries, esc):
         <section>
           <div class="flex items-center gap-2 mb-4">
             <i data-lucide="activity" class="w-5 h-5 text-primary"></i>
-            <h2 class="text-xl font-bold text-slate-900">Lattice dynamics</h2>
+            <h2 class="text-xl font-bold text-slate-900">Lattice Dynamics</h2>
           </div>
           <div class="bg-white border rounded-xl p-6">
             <div class="border-l-4 border-primary bg-blue-50 text-slate-700 text-sm rounded-r-lg p-4 mb-5 space-y-2">
@@ -1619,13 +1659,13 @@ def _phonon_section(summaries, esc):
                 structure is a saddle point, not a minimum, of the MLIP energy surface.{tol_bit}
                 <strong>{fe_sym}(300 K)</strong> {fe_def}.
               </p>
-              <p class="text-xs text-slate-500">
+              <p class="text-sm text-slate-500">
                 No structure is removed on this basis.
               </p>
             </div>
             <div class="overflow-x-auto border rounded-lg">
               <table class="w-full text-sm text-left text-slate-700">
-                <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
+                <thead class="bg-slate-50 text-slate-500 text-xs">
                   <tr>{header_html}</tr>
                 </thead>
                 <tbody>{"".join(rows)}</tbody>
@@ -1646,7 +1686,7 @@ def _source_label(source):
 
 
 def _uncertainty_section(summaries, esc):
-    """"Stability Uncertainty" section from the committee E_hull analysis
+    """"Stability Sensitivity" section from the committee E_hull analysis
     (``bulk["uncertainty"]``). ``""`` when no bulk carries one."""
     with_unc = [s for s in summaries if s["bulk"] and s["bulk"].get("uncertainty")]
     if not with_unc:
@@ -1682,9 +1722,8 @@ def _uncertainty_section(summaries, esc):
                     <td class="px-4 py-3">{_stability_badge(unc, esc)}</td>
                   </tr>""")
 
-    committee_bit = ", ".join(
-        f'{esc(m["model"])}' + (f' ({esc(m["head"])})' if m.get("head") else "")
-        for m in meta.get("committee", []))
+    committee_parts = [f'{esc(m["model"])}' + (f' ({esc(m["head"])})' if m.get("head") else "")
+                       for m in meta.get("committee", [])]
     notes = []
     if meta.get("dropped"):
         notes.append(f'{len(meta["dropped"])} structure(s) missing for at least one model were '
@@ -1696,26 +1735,78 @@ def _uncertainty_section(summaries, esc):
     if meta.get("missing_targets"):
         notes.append(f'{len(meta["missing_targets"])} selected bulk(s) could not be analysed.')
     notes_html = "".join(f"<p>{n}</p>" for n in notes)
+    floor_txt = _fmt(1000 * floor if floor is not None else None, 1)
+    column_notes = f"""
+            <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-sm text-slate-600 mt-5">
+              <div>
+                <dt class="font-semibold text-slate-900">Bulk</dt>
+                <dd>Bulk structure id (first 8 characters). Hover the pointer over an id to see the full UUID.</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">{" / ".join(esc(m) + ("*" if m == primary else "") for m in methods)} (eV/atom)</dt>
+                <dd>E<sub>hull</sub> of the bulk under each model; * marks the primary model used in the rest of
+                  the workflow. For a bulk on the hull, the value in parentheses is the margin by which it beats its
+                  best competitor (another polymorph or a decomposition), shown as a negative number.</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">&sigma;(&Delta;E<sub>d</sub>) (eV/atom)</dt>
+                <dd>&Delta;E<sub>d</sub> is the signed distance to the hull: E<sub>hull</sub> for a bulk above the
+                  hull, the negative margin for a bulk on it. &sigma;(&Delta;E<sub>d</sub>) is its standard deviation
+                  over all models, i.e. how strongly the models disagree about this bulk.</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">Bias (eV/atom)</dt>
+                <dd>Primary minus committee mean of &Delta;E<sub>d</sub>. Positive: {esc(primary)} places the bulk higher
+                  above the hull (less stable) than the committee does; negative: lower (more stable).</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">Votes</dt>
+                <dd>Number of models, out of all models, with E<sub>hull</sub> &le; {_fmt(meta.get('ehull_threshold'), 2)} eV/atom (the selection
+                  threshold).</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">&Delta;E<sub>force</sub> / &Delta;E<sub>stress</sub> (meV/atom)</dt>
+                <dd>The two parts of the relaxation sensitivity for model m*, the committee model with the largest
+                  total (formula above). A large &Delta;E<sub>force</sub> points to residual forces on the atoms
+                  (internal coordinates not relaxed); a large &Delta;E<sub>stress</sub> points to an imperfectly
+                  relaxed cell shape. On a flagged bulk the larger part is highlighted. Hover the pointer over a
+                  value to see the split for every committee model.</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">&Delta;E<sub>total</sub> / limit (meV/atom)</dt>
+                <dd>&Delta;E<sub>total</sub> = &Delta;E<sub>force</sub> + &Delta;E<sub>stress</sub>, compared with
+                  limit = max(&sigma;(&Delta;E<sub>d</sub>), {floor_txt} meV/atom). Above the limit the bulk is flagged
+                  (purple), and the structure that dominates is named under the value; it need not be one of the
+                  bulks listed here. Hover the pointer over a value for every contributing structure.</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">Label</dt>
+                <dd><em>robust</em>: E<sub>hull</sub> below the threshold for every model.
+                  <em>uncertain</em>: the models disagree on whether E<sub>hull</sub> is below the threshold.
+                  <em>unstable</em>: E<sub>hull</sub> above the threshold for every model.
+                  <em>relaxation (self)</em> / <em>relaxation (competing phase)</em>: &Delta;E<sub>total</sub>
+                  exceeds the limit, so relaxing on a committee model could shift E<sub>hull</sub> by as much as the
+                  model spread, and the spread is not trusted on its own; <em>self</em> when the bulk's own structure
+                  dominates, <em>competing phase</em> when a phase it is compared against does. Hover the pointer
+                  over a <em>relaxation</em> label for the per-model details.</dd>
+              </div>
+            </dl>"""
 
     return f"""
         <section>
           <div class="flex items-center gap-2 mb-4">
             <i data-lucide="activity" class="w-5 h-5 text-primary"></i>
-            <h2 class="text-xl font-bold text-slate-900">Stability Uncertainty</h2>
+            <h2 class="text-xl font-bold text-slate-900">Stability Sensitivity</h2>
           </div>
           <div class="bg-white border rounded-xl p-6">
             <div class="border-l-4 border-primary bg-blue-50 text-slate-700 text-sm rounded-r-lg p-4 mb-5 space-y-2">
               <p>
-                E<sub>hull</sub> (eV/atom) of each selected bulk under the primary MLIP
-                (<strong>{esc(primary)}</strong>*) and a committee of {committee_bit}. Committee
-                energies are <strong>single points on the {esc(primary)}-relaxed geometries</strong>;
-                every model's hull is built from the same {meta.get('n_common')} structures.
-                In parentheses, for a bulk on the hull: the margin by which it beats its best
-                competitor (another polymorph or a decomposition). The signed distance to the hull of
-                all other structures, &Delta;E<sub>d</sub>, is E<sub>hull</sub> above the hull and that negative
-                margin on it; <strong>&sigma;(&Delta;E<sub>d</sub>)</strong> is its spread over all models and
-                <strong>bias</strong> = primary &minus; committee mean.
-                <strong>Votes</strong> = models with E<sub>hull</sub> &le; {_fmt(meta.get('ehull_threshold'), 2)}.
+                How much does the stability verdict depend on the choice of MLIP? E<sub>hull</sub> of each
+                selected bulk is computed with the primary MLIP (<strong>{esc(primary)}</strong>) and a committee of
+                {_join_names(committee_parts)}. Committee energies are <strong>single points on the
+                {esc(primary)}-relaxed geometries</strong>; every model's hull is built from the same {meta.get('n_common')} structures.
+                The spread between models measures their disagreement; it is not an error bar calibrated
+                against DFT.
               </p>
               <p>
                 <strong>Relaxation sensitivity</strong> (meV/atom): the committee single points are not
@@ -1737,9 +1828,9 @@ def _uncertainty_section(summaries, esc):
                 &nbsp; &Delta;E<sub>stress</sub> = &delta;<sup>stress</sup><sub>m*</sub>,
                 &nbsp; &Delta;E<sub>total</sub> = &Delta;E<sub>force</sub> + &Delta;E<sub>stress</sub><br>
                 limit = max(&sigma;(&Delta;E<sub>d</sub>),
-                {_fmt(1000 * floor if floor is not None else None, 1)} meV/atom)
+                {floor_txt} meV/atom)
               </div>
-              <p class="text-xs text-slate-600">
+              <p class="text-sm text-slate-600">
                 s = structure, m = committee model. &lang;|F<sub>i</sub>|<sup>2</sup>&rang;: mean squared force
                 over the atoms (eV<sup>2</sup>/&Aring;<sup>2</sup>); V<sub>atom</sub>: volume per atom
                 (&Aring;<sup>3</sup>); &sigma;<sub>dev</sub> = &sigma; &minus; (tr&nbsp;&sigma;/3)&middot;I, with
@@ -1749,26 +1840,13 @@ def _uncertainty_section(summaries, esc):
                 hull phase) with atom fractions x<sub>j</sub>;
                 k = {_fmt(meta.get('force_constant'), 1)} eV/&Aring;<sup>2</sup> (effective force constant),
                 G = {_fmt(meta.get('shear_modulus'), 0)} GPa (shear modulus). Both parts are taken from the same
-                model m*, so they add up to &Delta;E<sub>total</sub>; the other models' split is in the tooltip.
-              </p>
-              <p>
-                A large <strong>&Delta;E<sub>force</sub></strong> points to residual forces on the atoms
-                (internal coordinates not relaxed); a large <strong>&Delta;E<sub>stress</sub></strong> points to
-                an imperfectly relaxed cell shape. A bulk whose &Delta;E<sub>total</sub> exceeds the limit is
-                labelled <em>relaxation (self)</em> when its own structure dominates &delta;<sub>m*</sub>, or
-                <em>relaxation (competing phase)</em> when a phase it is compared against does (named under the
-                value; it need not be one of the bulks listed here). On a flagged bulk the larger of the two parts
-                is highlighted.
+                model m*, so they add up to &Delta;E<sub>total</sub>.
               </p>
               {notes_html}
-              <p class="text-xs text-slate-500">
-                The spread measures disagreement between MLIPs; it is not an error bar calibrated
-                against DFT.
-              </p>
             </div>
             <div class="overflow-x-auto border rounded-lg">
               <table class="w-full text-sm text-left text-slate-700">
-                <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
+                <thead class="bg-slate-50 text-slate-500 text-xs">
                   <tr>
                     <th rowspan="2" class="px-4 py-3 align-bottom">Bulk</th>
                     {head_cells}
@@ -1786,7 +1864,7 @@ def _uncertainty_section(summaries, esc):
                 </thead>
                 <tbody>{"".join(rows)}</tbody>
               </table>
-            </div>
+            </div>{column_notes}
           </div>
         </section>"""
 
@@ -1977,7 +2055,7 @@ def _committee_note(summary, esc):
             ads_bulk["best_agree"], ads_bulk["best"], ads_meta["primary"], name))
     if not bits:
         return ""
-    return ('<p class="text-xs text-slate-600 -mt-4 mb-6">'
+    return ('<p class="text-sm text-slate-600 -mt-4 mb-6">'
             + " &nbsp;|&nbsp; ".join(bits) + "</p>")
 
 
@@ -2082,34 +2160,14 @@ def _surface_adsorption_section(summaries, esc):
                   The table asks whether the screening
                   conclusions would change under another model. The spread measures disagreement between
                   MLIPs; it is not an error bar calibrated against DFT.
-                  We compare the models in three ways:
+                  We compare the models in three ways, reported separately on purpose (a row can agree on
+                  energies and still change the ranking, or vice versa): <em>ranking stability</em> and
+                  <em>energetic agreement</em> (the table columns, explained below it) and <em>geometry
+                  sensitivity</em> (below). The per-bulk tables further down give every facet and candidate, and
+                  the reaction-path diagrams overlay each committee model as thin lines.
                 </p>
               </div>
-              <div class="grid gap-3 md:grid-cols-2">
-                <div class="bg-white border rounded-lg p-3">
-                  <h4 class="font-semibold text-slate-900 mb-1">Ranking stability</h4>
-                  <p class="text-xs text-slate-600">
-                    Would another model make a different decision in the workflow? <em>Lowest facet</em>:
-                    the same lowest-&gamma; facet. <em>Adsorption facets</em>: the same set of facets carried to
-                    adsorption (lowest {_fmt(n_selected, 0)} by &gamma;). <em>Best candidate</em>: the same lowest-&eta;
-                    adsorption candidate, compared as the complete configuration (facet, site, coverage;
-                    shown as #id), not just the facet.
-                  </p>
-                </div>
-                <div class="bg-white border rounded-lg p-3">
-                  <h4 class="font-semibold text-slate-900 mb-1">Energetic agreement</h4>
-                  <p class="text-xs text-slate-600">
-                    How far apart are the numbers? <em>Best &eta;</em>: the overpotential of {p}'s best
-                    candidate, computed by each model on its own energies (one fixed candidate, not each model's own
-                    best). <em>&sigma;<sub>&eta;</sub></em>: the sample standard deviation of these N values
-                    (N = {n_models} models, {p} included), in V; green if &le; {eta_tol_txt} V, amber above.
-                    <em>Max &sigma;<sub>&gamma;</sub></em>: &sigma;<sub>&gamma;</sub> is the same statistic for each
-                    facet's surface energy; the largest over the bulk's facets is shown (the per-facet values are in
-                    the detailed tables below).
-                  </p>
-                </div>
-              </div>
-              <div class="bg-white border rounded-lg p-3 text-xs text-slate-600 space-y-1">
+              <div class="bg-white border rounded-lg p-3 text-sm text-slate-600 space-y-1">
                 <h4 class="font-semibold text-slate-900 text-sm">Geometry sensitivity <span class="font-normal text-slate-500">(heuristic)</span></h4>
                 <p>
                   The committee models evaluate {p}'s geometries, not their own minima, so their energies could change
@@ -2140,12 +2198,7 @@ def _surface_adsorption_section(summaries, esc):
                   model, e.g. &ldquo;dominated by *OOH (UMA)&rdquo;.
                 </p>
               </div>
-              <p class="text-xs text-slate-600">
-                The three checks are reported separately on purpose: a row can agree on energies and still change
-                the ranking, or vice versa. Hover over a cell for per-model values; the per-bulk tables below give
-                each facet and candidate, and the reaction-path diagrams overlay each committee model as thin lines.
-              </p>
-              <details class="text-xs text-slate-600">
+              <details class="text-sm text-slate-600">
                 <summary class="cursor-pointer font-semibold text-slate-700">Definitions and thresholds</summary>
                 <div class="bg-white border rounded-lg px-4 py-3 mt-2 font-mono leading-6 overflow-x-auto">
                   &gamma;<sub>m</sub> = (E<sub>slab,m</sub> &minus; N<sub>slab</sub> &middot; &epsilon;<sub>bulk,m</sub>) / (2A)<br>
@@ -2175,7 +2228,7 @@ def _surface_adsorption_section(summaries, esc):
             </div>
             <div class="overflow-x-auto border rounded-lg">
               <table class="w-full text-sm text-left text-slate-700">
-                <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
+                <thead class="bg-slate-50 text-slate-500 text-xs">
                   <tr>
                     <th class="px-4 pt-3 pb-1"></th>
                     <th colspan="3" class="px-4 pt-3 pb-1 text-center border-b border-l border-slate-200">Ranking stability</th>
@@ -2194,6 +2247,55 @@ def _surface_adsorption_section(summaries, esc):
                 <tbody>{"".join(rows)}</tbody>
               </table>
             </div>
+            <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-sm text-slate-600 mt-5">
+              <div>
+                <dt class="font-semibold text-slate-900">Bulk</dt>
+                <dd>Bulk structure id (first 8 characters). Hover the pointer over an id to see the full UUID.</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">Ranking stability</dt>
+                <dd>Would another model make a different decision in the workflow? The next three columns say
+                  <em>yes</em> when every model makes the same choice as {p}.</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">Lowest facet agrees</dt>
+                <dd>Every model picks the same lowest-&gamma; facet.</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">Adsorption facets agree</dt>
+                <dd>Every model picks the same set of facets to carry to adsorption (lowest {_fmt(n_selected, 0)} by &gamma;).</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">Best candidate agrees</dt>
+                <dd>Every model picks the same lowest-&eta; adsorption candidate, compared as the complete
+                  configuration (facet, site, coverage; shown as #id), not just the facet. On <em>no</em>, the models
+                  that pick a different candidate are listed under it; hover the pointer over a <em>yes</em> to see
+                  the shared candidate.</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">Energetic agreement</dt>
+                <dd>How far apart are the numbers? The last three columns.</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">Max &sigma;<sub>&gamma;</sub> (eV/&Aring;&sup2;)</dt>
+                <dd>&sigma;<sub>&gamma;</sub> is the sample standard deviation of a facet's surface energy over all
+                  models; the largest over the bulk's facets is shown (per-facet values are in the per-bulk tables).
+                  Hover the pointer over a value to see the range over facets. &#9888;&#xFE0E; marks a geometry-sensitive
+                  facet (see <em>Geometry sensitivity</em> above).</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">Best &eta; ({esc(order)}) (V)</dt>
+                <dd>Overpotential of {p}'s best candidate, computed by each model on its own energies (one
+                  fixed candidate, not each model's own best). Hover the pointer over a value to see which candidate
+                  it is.</dd>
+              </div>
+              <div>
+                <dt class="font-semibold text-slate-900">&sigma;<sub>&eta;</sub> (V)</dt>
+                <dd>Sample standard deviation of the Best &eta; values (N = {n_models} models, {p} included); green if
+                  &le; {eta_tol_txt} V, amber above. Hover the pointer over a value to see the per-model values.
+                  &#9888;&#xFE0E; marks a geometry-sensitive best candidate.</dd>
+              </div>
+            </dl>
           </div>
         </section>"""
 
@@ -2252,9 +2354,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
     n_unc = sum(1 for s in summaries if s["bulk"] and s["bulk"].get("uncertainty"))
     n_surfaces = sum(s["n_surfaces"] for s in summaries)
     n_candidates = sum(s["n_reaction_candidates"] for s in summaries)
-    etas = [s["best_candidate"]["eta"] for s in summaries if s["best_candidate"]]
-    best_eta = min(etas) if etas else None
-    model = next((s["bulk"]["ml_bulk_model"] for s in summaries if s["bulk"]), None)
+    model =next((s["bulk"]["ml_bulk_model"] for s in summaries if s["bulk"]), None)
     bulk_task = _ml_stage_head("bulk_relax")
     surface_model = _ml_surface_model()
     surface_task = _ml_stage_head("face_build")
@@ -2337,13 +2437,26 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
         ehull_note = (f"The central value is the {esc(ehull_models[0])} prediction. The &plusmn; value "
                       f"is the standard deviation across {esc(_join_names(ehull_models))}. It represents "
                       "disagreement between these models, not an uncertainty interval calibrated "
-                      "against DFT.")
+                      "against DFT. Hover the pointer over a value to see the per-model values "
+                      f"({esc(', '.join(ehull_models))}) and their range.")
     else:
         by_model = f" by {esc(model)}" if model else ""
         ehull_note = (f"ML-predicted energy above the convex hull{by_model}; no committee "
                       "spread is available for this run.")
     bulk_notes = f"""
-              <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-xs text-slate-600">
+              <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-sm text-slate-600">
+                <div>
+                  <dt class="font-semibold text-slate-900">UUID</dt>
+                  <dd>Unique identifier of the bulk structure in the uvsib structure database. Only the
+                    first 8 characters are shown; hover the pointer over an id to see the full UUID. The same identifier
+                    labels this bulk throughout the report.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">MP ID</dt>
+                  <dd>Materials Project identifier of the structure, linked to its Materials Project
+                    page. Shown only for structures retrieved from the Materials Project database
+                    (<em>MPDB</em> sources); &mdash; for CSP and ML-generated structures.</dd>
+                </div>
                 <div>
                   <dt class="font-semibold text-slate-900">Source</dt>
                   <dd><em>MPDB(exp.)</em>: experimentally observed structures retrieved from the Materials
@@ -2459,7 +2572,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
 
           <div class="overflow-x-auto mb-6 border rounded-lg">
             <table class="w-full text-sm text-left text-slate-700">
-              <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
+              <thead class="bg-slate-50 text-slate-500 text-xs">
                 <tr>
                   <th class="px-4 py-3">Surface ID</th>
                   <th class="px-4 py-3">Miller Index</th>
@@ -2491,27 +2604,31 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
     if surf_meta_any:
         surf_order = " / ".join([surf_meta_any["primary"]]
                                 + [m["model"] for m in surf_meta_any.get("committee", [])])
-        spread_bit = ", with the cross-model spread (&plusmn;, standard deviation; hover for per-model values)"
+        spread_bit = (", with the cross-model spread (&plusmn;, standard deviation). Hover the pointer over a "
+                      "value to see the per-model values")
         eta_spread_bit = (", with the spread across models (&plusmn;) for that same candidate; the chips "
                           "show whether the spread is within tolerance, whether the potential-determining "
-                          "step (PDS) is the same under every model, and the geometry sensitivity")
+                          "step (PDS) is the same under every model, and the geometry sensitivity. Hover the "
+                          "pointer over a value to see the per-model &eta;, or over a chip to see the spread, "
+                          "the per-model PDS, or the geometry-sensitivity estimate")
         unc_terms = f"""
                 <div>
                   <dt class="font-semibold text-slate-900">&gamma; rank</dt>
                   <dd>Rank of the surface-energy candidate within this bulk, in the order {esc(surf_order)}
-                    (1 = lowest &gamma;).</dd>
+                    (1 = lowest &gamma;). Hover the pointer over a rank to see the model order.</dd>
                 </div>
                 <div>
                   <dt class="font-semibold text-slate-900">&gamma; checks</dt>
                   <dd>Surface-energy ranking agreement (<em>rank: same</em> / <em>differs</em> across models)
                     and the geometry-sensitivity status (<em>geometry: low</em> / <em>sensitive</em>, a heuristic
-                    from the other models' residual forces on the {esc(surf_primary)} geometries).</dd>
+                    from the other models' residual forces on the {esc(surf_primary)} geometries). Hover the pointer over a
+                    chip to see the per-model ranks or the geometry-sensitivity estimate behind it.</dd>
                 </div>"""
     else:
         spread_bit = eta_spread_bit = unc_terms = ""
     per_bulk_terms = f"""
           <div class="rounded-xl border bg-white p-6">
-            <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-xs text-slate-600">
+            <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-sm text-slate-600">
                 <div>
                   <dt class="font-semibold text-slate-900">Surface ID</dt>
                   <dd>Internal identifier for the generated slab or surface candidate.</dd>
@@ -2550,7 +2667,6 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
             </dl>
           </div>"""
 
-    best_eta_cell = f"{best_eta:.3f} V" if best_eta is not None else "&mdash;"
     n_light_cell = str(n_light) if electronic_present else "&mdash;"
 
     # -- gap models: names for the Pipeline Metadata "Light Screen" entry, the
@@ -2573,9 +2689,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                             f"{target_txt(t)}s")
         gap_models_note = (
             ". ".join(bits) + ". "
-            + ("The HSE label belongs to megnet_mfi only. " if screen_fidelity and len(screen_targets) > 1 else "")
-            + ("The reported gap is the plain mean of these models, so it mixes their target "
-               "quantities; &plusmn; is their spread. " if len(screen_targets) > 1 else ""))
+            + ("The HSE label belongs to megnet_mfi only. " if screen_fidelity and len(screen_targets) > 1 else ""))
 
     # -- light-harvesting section (only when the optical screen ran) ---------
     if electronic_present:
@@ -2625,27 +2739,33 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                            for v in [bulk_straddle(s.get("electronic"), reaction, reaction_path)]
                            if v and v.get("margin_required_V") is not None), None)
         margin_txt = f"{margin_req:g} V" if margin_req is not None else "the required margin"
+        gap_mean_txt = (f"Plain mean of the ML-predicted band gaps ({gap_models_txt}), so it mixes their "
+                        "target quantities." if len(screen_targets) > 1 else
+                        f"Mean of the ML-predicted band gaps ({gap_models_txt}).")
+        gap_source_txt = (f"Gaps from pretrained ML models. {gap_models_note.strip()}" if gap_models_note
+                          else f"Gaps from pretrained ML models ({gap_models_txt}).")
         light_notes = f"""
-              <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-xs text-slate-600 mt-5">
+              <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-sm text-slate-600 mt-5">
                 <div>
                   <dt class="font-semibold text-slate-900">Bulk</dt>
-                  <dd>Bulk structure id (first 8 characters; hover for the full UUID).
+                  <dd>Bulk structure id (first 8 characters; hover the pointer over an id to see the full UUID).
                     <em>not screened</em>: the optical screen produced no result for this bulk.</dd>
                 </div>
                 <div>
                   <dt class="font-semibold text-slate-900">Gap (eV)</dt>
-                  <dd>Mean of the ML-predicted band gaps ({gap_models_txt}). &plusmn; is the standard deviation
+                  <dd>{gap_mean_txt} &plusmn; is the standard deviation
                     over these models (for two models, half their difference): model disagreement, not a
-                    calibrated confidence interval. Hover for the per-model values.</dd>
+                    calibrated confidence interval. Hover the pointer over a value to see the per-model values.</dd>
                 </div>
                 <div>
                   <dt class="font-semibold text-slate-900">Straddle</dt>
                   <dd><em>straddles</em>: both Red. margin and Ox. margin are at least {margin_txt}.
-                    <em>no</em>: at least one edge falls short (hover for both margins).</dd>
+                    <em>no</em>: at least one edge falls short. Hover the pointer over a verdict to see both margins.</dd>
                 </div>
                 <div>
                   <dt class="font-semibold text-slate-900">E<sub>CB</sub> / E<sub>VB</sub> (V<sub>RHE</sub>)</dt>
-                  <dd>Estimated conduction- and valence-band edges as electrochemical potentials:
+                  <dd>Conduction- and valence-band edges estimated with the empirical Butler&ndash;Ginley / Mulliken
+                    relation, as electrochemical potentials:
                     E<sub>CB</sub> = &chi; &minus; 4.5 eV &minus; E<sub>g</sub>/2 and E<sub>VB</sub> = E<sub>CB</sub> + E<sub>g</sub>,
                     with &chi; the geometric-mean Mulliken electronegativity of the composition and
                     E<sub>g</sub> the Gap column. On this scale a more negative value is a higher-lying
@@ -2687,18 +2807,10 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 (E<sub>VB</sub>) below the oxidation level, each by at least the required
                 margin. Target for <strong>{esc(reaction)} / {esc(reaction_path)}</strong>:
                 {couple_bit}.
+                Here <strong>{n_light_cell}</strong> of {len(summaries)} bulk(s) straddle.
               </p>
-              <p>
-                <strong>Straddle</strong> = both edges clear their level with margin
-                (<strong>{n_light_cell}</strong> of {len(summaries)} bulk(s) here).
-                <strong>Red. / Ox. margin</strong> is the head-room beyond the required
-                potential &mdash; positive clears it, negative is how far short the edge
-                falls. <strong>Req. min gap</strong> is the smallest gap that could
-                straddle at all, <em>(U<sub>ox</sub> &minus; U<sub>red</sub>) + 2&times;margin</em>.
-              </p>
-              <p class="text-xs text-slate-500">
-                Gap from pretrained ML models ({gap_models_txt}). {gap_models_note}Edges from the
-                empirical Butler&ndash;Ginley / Mulliken relation (E<sub>e</sub> = 4.5 eV), V vs RHE.
+              <p class="text-sm text-slate-500">
+                {gap_source_txt}
               </p>
             </div>
             <div class="border-l-4 border-amber-500 bg-amber-50 text-amber-900 text-sm rounded-r-lg p-4 mb-3">
@@ -2710,7 +2822,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
             </div>
             <div class="overflow-x-auto border rounded-lg">
               <table class="w-full text-sm text-left text-slate-700">
-                <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
+                <thead class="bg-slate-50 text-slate-500 text-xs">
                   <tr>
                     <th class="px-4 py-3">Bulk</th>
                     <th class="px-4 py-3">Gap (eV)</th>
@@ -2740,7 +2852,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
         n_robust_cand = sum(1 for u in analysed_candidates if u.get("label") == "robust")
         robust_candidates_tile = f"""
               <div class="p-3 rounded-xl bg-slate-50 border border-slate-100" title="Reaction candidates with the same potential-determining step and std(eta) within tolerance under every committee MLIP">
-                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Robust candidates</p>
+                <p class="text-xs font-bold text-slate-500 mb-1">Robust candidates</p>
                 <p class="text-lg font-bold text-slate-900">{n_robust_cand} / {len(analysed_candidates)}</p>
               </div>"""
     else:
@@ -2748,32 +2860,46 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
     if unc_present:
         robust_tile = f"""
               <div class="p-3 rounded-xl bg-slate-50 border border-slate-100" title="Bulks stable under every committee MLIP">
-                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Robust bulks</p>
+                <p class="text-xs font-bold text-slate-500 mb-1">Robust bulks</p>
                 <p class="text-lg font-bold text-slate-900">{n_robust} / {n_unc}</p>
               </div>"""
     else:
         robust_tile = ""
-    summary_cols = f"md:grid-cols-{5 + bool(unc_present) + bool(analysed_candidates)}"
-    summary_note = (
-        "<em>Bulk candidates</em>: relaxed bulk structures screened for this run. "
-        "<em>Surfaces retained</em>: slabs kept after relaxation (non-converged slabs dropped), "
-        "summed over all bulks. <em>Reaction candidates</em>: adsorption configurations "
-        "(facet, site, coverage) with &eta; &le; 2.0 V. <em>Lowest predicted &eta;</em>: the smallest "
-        "ML-predicted overpotential over all candidates. <em>Light-viable</em>: bulks whose predicted band gap "
-        f"straddles the {esc(reaction)} redox couple with margin."
-    )
+    summary_cols = f"md:grid-cols-{3 + bool(unc_present) + bool(analysed_candidates)}"
+    # One definition per tile, in tile order.
+    summary_terms = [
+        ("Bulk candidates", "Relaxed bulk structures screened in this run."),
+        ("Surfaces retained", "Surface slabs kept after relaxation, summed over all bulks. Slabs whose "
+                              "relaxation did not converge are dropped."),
+        ("Reaction candidates", "Adsorption configurations (facet, site, coverage) with a predicted "
+                                "overpotential &eta; &le; 2.0 V."),
+    ]
     if unc_present:
-        summary_note += " <em>Robust bulks</em>: stable under every committee MLIP."
+        summary_terms.append(("Robust bulks", "Bulks predicted stable under every committee MLIP "
+                                              "(see <em>Stability Sensitivity</em>)."))
     if analysed_candidates:
-        summary_note += (" <em>Robust candidates</em>: same potential-determining step and "
-                         "&sigma;<sub>&eta;</sub> within tolerance under every committee MLIP.")
+        summary_terms.append(("Robust candidates",
+                              "Reaction candidates with the same potential-determining step under every "
+                              "committee MLIP and &sigma;<sub>&eta;</sub> within tolerance "
+                              "(see <em>Surface &amp; Adsorption Uncertainty</em>)."))
+    summary_note = "".join(f"""
+              <div>
+                <dt class="font-semibold text-slate-900">{dt}</dt>
+                <dd>{dd}</dd>
+              </div>""" for dt, dd in summary_terms)
+
+    # "ZnO — CO2RR — CO reduction to CH₄"; an unlisted path is shown by its bare name
+    # (pathway_title's "REACTION / path" fallback would repeat the reaction).
+    path_title = (_PATHWAY_TITLES.get((reaction or "").strip().upper(), {})
+                  .get((reaction_path or "").strip().lower()) or reaction_path)
+    page_title = f"{esc(chemical_formula)} &mdash; {esc(reaction)} &mdash; {esc(path_title)}"
 
     html_doc = f"""<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>{esc(chemical_formula)} &mdash; {esc(pathway_title(reaction, reaction_path))}</title>
+    <title>{page_title}</title>
 
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -2786,7 +2912,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
     <div class="bg-white border-b px-6 py-6 sticky top-0 z-10">
       <div class="max-w-screen-2xl mx-auto flex flex-col gap-2">
         <h1 class="text-slate-900 text-2xl font-bold tracking-tight" title="{esc(reaction)} / {esc(reaction_path)}">
-          {esc(chemical_formula)} &mdash; {esc(pathway_title(reaction, reaction_path))}
+          {page_title}
         </h1>
       </div>
     </div>
@@ -2802,27 +2928,20 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
           <div class="rounded-xl border bg-white shadow-sm p-6">
             <div class="grid grid-cols-2 {summary_cols} gap-4">
               <div class="p-3 rounded-xl bg-slate-50 border border-slate-100">
-                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Bulk Candidates</p>
+                <p class="text-xs font-bold text-slate-500 mb-1">Bulk candidates</p>
                 <p class="text-lg font-bold text-slate-900">{n_bulks}</p>
               </div>
               <div class="p-3 rounded-xl bg-slate-50 border border-slate-100">
-                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Surfaces Retained</p>
+                <p class="text-xs font-bold text-slate-500 mb-1">Surfaces retained</p>
                 <p class="text-lg font-bold text-slate-900">{n_surfaces}</p>
               </div>
               <div class="p-3 rounded-xl bg-slate-50 border border-slate-100">
-                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Reaction Candidates</p>
+                <p class="text-xs font-bold text-slate-500 mb-1">Reaction candidates</p>
                 <p class="text-lg font-bold text-slate-900">{n_candidates}</p>
-              </div>
-              <div class="p-3 rounded-xl bg-slate-50 border border-slate-100">
-                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Lowest Predicted &eta;</p>
-                <p class="text-lg font-bold text-slate-900">{best_eta_cell}</p>
-              </div>
-              <div class="p-3 rounded-xl bg-slate-50 border border-slate-100" title="Bulks whose ML band gap straddles this reaction's redox couple with margin">
-                <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Light-viable</p>
-                <p class="text-lg font-bold text-slate-900">{n_light_cell}</p>
               </div>{robust_tile}{robust_candidates_tile}
             </div>
-            <p class="text-xs text-slate-600 mt-4">{summary_note}</p>
+            <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-sm text-slate-600 mt-5 pt-5 border-t border-slate-100">{summary_note}
+            </dl>
           </div>
         </section>
 
@@ -2834,9 +2953,9 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
           <div class="bg-white border rounded-xl overflow-hidden">
             <div class="overflow-x-auto">
               <table class="w-full text-sm text-left text-slate-700">
-                <thead class="bg-slate-50 text-slate-500 uppercase text-xs">
+                <thead class="bg-slate-50 text-slate-500 text-xs">
                   <tr>
-                    <th class="px-6 py-3">UUID</th>
+                    <th class="px-6 py-3" title="Identifier of the bulk structure in the uvsib database; first 8 characters shown, hover a cell for the full UUID">UUID</th>
                     <th class="px-6 py-3" title="MPDB(exp.): experimentally observed, Materials Project · MPDB(stb.): stable, Materials Project · CSP: crystal structure prediction · generated: ML-generated">Source</th>
                     <th class="px-6 py-3" title="Materials Project id (MPDB-sourced bulks only)">MP ID</th>
                     <th class="px-6 py-3" title="± = standard deviation across the MLIP committee (model disagreement, not a DFT-calibrated interval)">E above hull (eV/atom)</th>
