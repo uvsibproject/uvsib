@@ -32,4 +32,10 @@ class UMAParser(Parser):
             content = f.read()
         num_failed = int(content)
 
+        # adsorbate sanity-check rejections (adsorbates jobs only, see docs/sanity_checks.md)
+        rejected_filename = 'rejected.json'
+        if rejected_filename in retrieved_folder.list_object_names():
+            with retrieved_folder.open(rejected_filename, 'r') as f:
+                data['rejected'] = json.load(f)
+
         self.out("output_dict", Dict(dict=data))

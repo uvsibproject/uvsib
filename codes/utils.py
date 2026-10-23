@@ -43,9 +43,19 @@ def get_cmdline(job_info):
             f"--fmax={job_info['fmax']}",
             f"--max_steps={job_info['max_steps']}",
             f"--reaction={job_info['reaction']}",
-            f"--pathway={job_info['pathway']}",
-            f"--no-validate"]
+            f"--pathway={job_info['pathway']}"]
         )
+        # post-relaxation sanity checks (docs/sanity_checks.md); off unless
+        # input.yaml adsorbates.validate is true
+        if not job_info.get('validate', False):
+            cmdline.append("--no-validate")
+        if job_info.get('check_slab_integrity', False):
+            cmdline.append("--check-slab-integrity")
+        if job_info.get('check_energy_outliers', False):
+            cmdline.append("--check-energy-outliers")
+        for key in ('bind_tol', 'graph_tol', 'slab_max_disp', 'energy_mad_factor'):
+            if job_info.get(key) is not None:
+                cmdline.append(f"--{key}={job_info[key]}")
     elif job_type == 'akmc':
         cmdline.extend([
             f"--fmax={job_info['fmax']}",

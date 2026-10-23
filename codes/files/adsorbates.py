@@ -2477,6 +2477,10 @@ def generate_adsorbed_structures(reaction: str, pathway_name: str = "") -> dict:
     # Build slab + adsorbate
     site_types = ['ontop', 'bridge', 'hollow']
     adsorption_sets = {}
+    # site counts for the per-surface diagnostics: every (repeat, site) tried,
+    # and those dropped because an adsorbate could not be placed without overlap
+    n_sites = 0
+    n_placement_failed = 0
     multipliers = [(1,1,1), (1,2,1)] #get_multipliers(slab_pmg) #TODO only for test
     for idx, repeat in enumerate(multipliers):
         clean_slab_pmg = asf.slab.copy()
@@ -2507,8 +2511,11 @@ def generate_adsorbed_structures(reaction: str, pathway_name: str = "") -> dict:
 
                 # Gas-phase references are computed once in run_relaxation and
                 # attached per-set there, so per-site duplication is not needed.
+                n_sites += 1
                 if len(adsorb_set["structures"]) == len(adsorbates):
                     adsorption_sets[idx]["adsorb_set"].append(adsorb_set)
+                else:
+                    n_placement_failed += 1
 
     # Reference intramolecular bond graphs, keyed by adsorbate name, for the
     # post-relaxation identity check in run_relaxation (see docs/sanity_checks.md).
@@ -2518,7 +2525,8 @@ def generate_adsorbed_structures(reaction: str, pathway_name: str = "") -> dict:
     }
 
     return {"sets": adsorption_sets, "gas_refs": gas_refs,
-            "expected_graphs": expected_graphs}
+            "expected_graphs": expected_graphs,
+            "placement": {"n_sites": n_sites, "n_placement_failed": n_placement_failed}}
 
 
 def run_relaxation(ml_model: str, calc, fmax: float, max_steps: int,
@@ -2578,6 +2586,10 @@ def run_relaxation(ml_model: str, calc, fmax: float, max_steps: int,
     rejected = []
     num_failed = 0
     total_number = 0
+    # per-set outcome counts for the per-surface diagnostics (output.json "summary")
+    n_relax_error = 0
+    n_not_converged = 0
+    n_rejected = 0
     model_key = f'{ml_model.lower()}_energy'
 
     result = generate_adsorbed_structures(reaction, pathway)
@@ -2635,10 +2647,12 @@ def run_relaxation(ml_model: str, calc, fmax: float, max_steps: int,
                 except Exception as e:
                     print(f"Warning: Relaxation failed for {adsorbed.info.get('adsorbate', 'unknown')}: {e}")
                     num_failed += 1
+                    n_relax_error += 1
                     break
 
                 if not relax.converged:
                     num_failed += 1
+                    n_not_converged += 1
                     break
 
                 ads_energy = adsorbed.get_potential_energy()
@@ -2664,6 +2678,7 @@ def run_relaxation(ml_model: str, calc, fmax: float, max_steps: int,
                                 "repeat": list(adsorb_set["repeat"]),
                                 "reason": verdict.reason})
                             num_failed += 1
+                            n_rejected += 1
                             break
 
                 relaxed_structures.append(jsonio.encode(adsorbed))
@@ -2681,13 +2696,25 @@ def run_relaxation(ml_model: str, calc, fmax: float, max_steps: int,
                 relaxed_sets.append(relaxed_set)
 
     # Layer 4 (opt-in): ensemble energy-outlier rejection across sites.
+    n_outliers = 0
     if check_energy_outliers and relaxed_sets:
         relaxed_sets, outlier_rejects = _flag_energy_outliers(relaxed_sets, model_key, energy_mad_factor)
         rejected.extend(outlier_rejects)
         num_failed += len(outlier_rejects)
+        n_outliers = len(outlier_rejects)
 
     # Write output files
-    output = {'structures': relaxed_sets}
+    summary = dict(result.get("placement", {}))
+    summary.update({
+        "n_sets": sum(len(sd["adsorb_set"]) for sd in adsorption_sets.values()),
+        "n_relax_error": n_relax_error,
+        "n_not_converged": n_not_converged,
+        "n_rejected": n_rejected,
+        "n_outliers": n_outliers,
+        "n_relaxed": len(relaxed_sets),
+        "validate": bool(validate_adsorbates),
+    })
+    output = {'structures': relaxed_sets, 'summary': summary}
     with open('output.json', 'w') as f:
         json.dump(output, f)
 
@@ -2722,6 +2749,14 @@ if __name__ == "__main__":
                         help="opt-in layer 3: reject sets where the slab reconstructs")
     parser.add_argument("--check-energy-outliers", action="store_true",
                         help="opt-in layer 4: reject MAD-outlier adsorption energies")
+    parser.add_argument("--bind_tol", type=float, default=1.25,
+                        help="layer 1: surface-binding distance factor x (r_cov_i + r_cov_j)")
+    parser.add_argument("--graph_tol", type=float, default=_ADSORBATE_BOND_TOL,
+                        help="layer 2: bond-graph distance factor x (r_cov_i + r_cov_j)")
+    parser.add_argument("--slab_max_disp", type=float, default=1.5,
+                        help="layer 3: max slab-atom displacement (A)")
+    parser.add_argument("--energy_mad_factor", type=float, default=5.0,
+                        help="layer 4: outlier cut in robust standard deviations")
     args = parser.parse_args()
 
     from _calculators import make_calculator
@@ -2732,4 +2767,7 @@ if __name__ == "__main__":
                    reaction=args.reaction, pathway=args.pathway,
                    validate_adsorbates=not args.no_validate,
                    check_slab_integrity=args.check_slab_integrity,
-                   check_energy_outliers=args.check_energy_outliers)
+                   check_energy_outliers=args.check_energy_outliers,
+                   bind_tol=args.bind_tol, graph_tol=args.graph_tol,
+                   slab_max_disp=args.slab_max_disp,
+                   energy_mad_factor=args.energy_mad_factor)

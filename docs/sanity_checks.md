@@ -146,10 +146,29 @@ silently -- if numbers look thin, read `rejected.json` to see why.
 | `--no-validate`            | turn OFF layers 0-2 (default: on) |
 | `--check-slab-integrity`   | turn ON layer 3 |
 | `--check-energy-outliers`  | turn ON layer 4 |
+| `--bind_tol`, `--graph_tol`, `--slab_max_disp`, `--energy_mad_factor` | tolerances (see below) |
 
-The defaults (layers 0-2 on, 3-4 off) apply automatically through the AiiDA
-workchains with no further wiring, because `run_relaxation` defaults to
-`validate_adsorbates=True`.
+## input.yaml
+
+In the AiiDA workflow the checks are controlled from the `adsorbates:` block of
+`input.yaml`; `get_cmdline` (`codes/utils.py`) turns the keys into the flags
+above. **Validation is OFF unless `validate: true` is set** -- the workflow
+passes `--no-validate` otherwise.
+
+```yaml
+adsorbates:
+  validate: true                # layers 0-2 (default false)
+  check_slab_integrity: false   # layer 3
+  check_energy_outliers: false  # layer 4
+  bind_tol: 1.25                # optional tolerances; omitted -> script defaults
+  graph_tol: 1.25
+  slab_max_disp: 1.5
+  energy_mad_factor: 5.0
+```
+
+The MLIP parsers copy `rejected.json` into the calculation's `output_dict`
+(key `rejected`), and `AdsorbatesWorkChain` reports the number of rejected
+sets per surface with their adsorbates and reasons.
 
 # Tolerances and tuning
 

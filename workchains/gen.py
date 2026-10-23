@@ -33,7 +33,8 @@ class GeneratorWorkChain(WorkChain):
 
         spec.exit_code(300, "ERROR_GENERATIVE_FAILED", message="Generative calculation failed (no generator produced structures)")
         spec.exit_code(301, "ERROR_ML_RELAX_FAILED", message="ML relaxation failed")
-        spec.exit_code(302, "ERROR_NO_CHEMSYS_FOUND", message="Chemical system does not exist in DBChemsys")
+        spec.exit_code(302, "ERROR_NO_STRUCTURE_FOUND", message="No low energy chemical system was found")
+        spec.exit_code(303, "ERROR_NO_CHEMSYS_FOUND", message="Chemical system does not exist in DBChemsys")
 
     def setup(self):
         """Setup and report"""
@@ -152,8 +153,7 @@ class GeneratorWorkChain(WorkChain):
             update_row(DBChemsys, row.uuid,{"gen_structures": "Ready"})
 
         if failed_ml_e:
-            self.report("ML relaxation failed.")
-            return self.exit_codes.ERROR_ML_RELAX_FAILED
+            return self.exit_codes.ERROR_NO_STRUCTURE_FOUND
 
     def final_report(self):
         self.report(f"GeneratorWorkChain for {self.ctx.chemical_systems} finished successfully")

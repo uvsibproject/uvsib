@@ -89,7 +89,11 @@ Caveats worth knowing:
   no candidate under that threshold, or is missing a pathway intermediate that
   dissociated during relaxation (see the ``KeyError`` handling in
   ``AdsorbatesWorkChain.store_results_ml``) -- not necessarily "bad", possibly
-  "not evaluated".
+  "not evaluated". Which of these it was is recorded per surface by
+  AdsorbatesWorkChain in ``DBSurface.attributes["adsorbates"][reaction][reaction_path]``
+  and shown in the "Adsorbate screen" column (``adsorbate_diagnostic_parts``);
+  a pathway with no candidate at all gets a summary of the reasons
+  (``no_candidate_reasons``) and the report is still written.
 """
 from collections import defaultdict
 
@@ -205,6 +209,8 @@ def surfaces_for_bulk(chemical_formula):
             "area": _slab_area(slab),
             "shift": slab.get("shift"),
             "uncertainty": _analysed(row.attributes, "gamma_std"),
+            # {reaction: {reaction_path: diagnostics}} written by AdsorbatesWorkChain
+            "adsorbate_runs": (row.attributes or {}).get("adsorbates"),
         })
     for surfaces in by_uuid.values():
         surfaces.sort(key=lambda s: s["formation_energy"]
@@ -417,6 +423,129 @@ _REACTION_MODULES = {
 }
 
 
+def adsorbate_diagnostic_parts(diag):
+    """Short human-readable outcome of the adsorbate screen on one surface, from
+    the diagnostics AdsorbatesWorkChain stores in
+    ``DBSurface.attributes["adsorbates"][reaction][reaction_path]``. Shared by
+    the workchain log and the HTML report so both say the same thing."""
+    if not diag:
+        return ["no diagnostics recorded"]
+    if diag.get("job") == "not_screened":
+        return [f"not screened (only the {diag.get('max_num_ads', '?')} lowest-energy "
+                "surfaces of each bulk are screened)"]
+    if diag.get("job") == "failed":
+        return [f"adsorbate job failed (exit {diag.get('exit_status')})"]
+    parts = []
+    summary = diag.get("summary") or {}
+    if summary:
+        parts.append(f"{summary.get('n_sites', 0)} sites tried")
+        for key, text in (("n_placement_failed", "not placeable (overlap)"),
+                          ("n_relax_error", "relaxation error"),
+                          ("n_not_converged", "not converged")):
+            if summary.get(key):
+                parts.append(f"{summary[key]} {text}")
+    rejected = diag.get("rejected") or []
+    n_rejected = sum(r["count"] for r in rejected)
+    if n_rejected:
+        detail = ", ".join(f"{r['adsorbate']} {r['reason']} ×{r['count']}" for r in rejected)
+        parts.append(f"{n_rejected} rejected by sanity checks ({detail})")
+    elif summary and not summary.get("validate", True):
+        parts.append("sanity checks off")
+    if diag.get("n_missing_intermediate"):
+        names = ", ".join(sorted(diag.get("missing_intermediates") or {}))
+        parts.append(f"{diag['n_missing_intermediate']} missing intermediate ({names})")
+    if diag.get("n_eta_above"):
+        limit = diag.get("eta_limit")
+        text = (f"{diag['n_eta_above']} with η above {limit:g} V" if limit is not None
+                else f"{diag['n_eta_above']} above the η limit")
+        if diag.get("min_eta") is not None and not diag.get("n_stored"):
+            text += f" (lowest {diag['min_eta']:.2f} V)"
+        parts.append(text)
+    parts.append(f"{diag.get('n_stored', 0)} stored")
+    return parts
+
+
+def no_candidate_reasons(summaries):
+    """Why a (reaction, pathway) ended with no candidate at all: the per-surface
+    diagnostics of every bulk added up, as a list of sentences."""
+    surfaces = [surf for s in summaries for surf in s["surfaces"]]
+    diags = [surf.get("adsorbate_diagnostics") for surf in surfaces]
+    screened = [d for d in diags if d and d.get("job") in ("ok", "failed")]
+    if not surfaces:
+        return ["no surface was retained, so no adsorbate was placed"]
+    if not screened:
+        return ["no adsorbate diagnostics were recorded for this reaction path"]
+    max_ads = next((d["max_num_ads"] for d in diags if d and d.get("max_num_ads")), None)
+    reasons = [f"{len(screened)} of {_n(len(surfaces), 'surface')} screened"
+               + (f" (only the {max_ads} lowest-energy surfaces of each bulk are screened)"
+                  if max_ads else "")]
+    failed = [d for d in screened if d.get("job") == "failed"]
+    if failed:
+        reasons.append(f"{_n(len(failed), 'adsorbate job')} failed")
+    totals, rejected, missing = defaultdict(int), defaultdict(int), defaultdict(int)
+    min_eta, limit = None, None
+    for d in screened:
+        for key, value in (d.get("summary") or {}).items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                totals[key] += value
+        for r in d.get("rejected") or []:
+            rejected[(r["adsorbate"], r["reason"])] += r["count"]
+        for name, n in (d.get("missing_intermediates") or {}).items():
+            missing[name] += n
+        totals["n_eta_above"] += d.get("n_eta_above") or 0
+        if d.get("min_eta") is not None and (min_eta is None or d["min_eta"] < min_eta):
+            min_eta = d["min_eta"]
+        limit = d.get("eta_limit", limit)
+    if totals["n_sites"]:
+        reasons.append(f"{_n(totals['n_sites'], 'adsorption site')} tried, "
+                       f"{_n(totals['n_relaxed'], 'complete set')} relaxed")
+    for key, word, text in (("n_placement_failed", "site", "where an adsorbate could not be placed without overlap"),
+                            ("n_relax_error", "set", "with a relaxation error"),
+                            ("n_not_converged", "set", "that did not converge")):
+        if totals[key]:
+            reasons.append(f"{_n(totals[key], word)} {text}")
+    if rejected:
+        detail = ", ".join(f"{ads} {reason} ×{n}" for (ads, reason), n
+                           in sorted(rejected.items(), key=lambda kv: -kv[1]))
+        reasons.append(f"{_n(sum(rejected.values()), 'set')} rejected by the sanity checks ({detail})")
+    if missing:
+        reasons.append(f"{_n(sum(missing.values()), 'set')} missing a pathway intermediate "
+                       f"({', '.join(sorted(missing))})")
+    if totals["n_eta_above"]:
+        bit = f" (lowest η {min_eta:.2f} V)" if min_eta is not None else ""
+        lim = f"{limit:g} V" if limit is not None else "the limit"
+        reasons.append(f"{_n(totals['n_eta_above'], 'candidate')} with η above {lim}{bit}")
+    return reasons
+
+
+def _n(count, word):
+    """'1 set' / '3 sets'."""
+    return f"{count} {word}{'' if count == 1 else 's'}"
+
+
+def _adsorbate_screen_cell(surf, esc):
+    """Report-table cell: the adsorbate-screen outcome of one surface."""
+    diag = surf.get("adsorbate_diagnostics")
+    parts = adsorbate_diagnostic_parts(diag)
+    if not diag and surf.get("reaction_candidates"):
+        # screened by a run that predates the diagnostics
+        css, title = "text-slate-600", "Screened before per-surface diagnostics were recorded"
+        parts = [f"{len(surf['reaction_candidates'])} stored", "(screened before diagnostics were recorded)"]
+    elif not diag:
+        css, title = "text-slate-400 italic", ("No adsorbate diagnostics: the surface was not screened, or it "
+                                               "was screened before diagnostics were recorded")
+    elif diag.get("job") == "not_screened":
+        css, title = "text-slate-400 italic", "Only the lowest-energy surfaces of each bulk are screened"
+    elif diag.get("job") == "failed":
+        css, title = "text-red-700", "The adsorbate calculation for this surface did not finish"
+    elif not diag.get("n_stored"):
+        css, title = "text-amber-700", "Screened, but no candidate was stored for this surface"
+    else:
+        css, title = "text-slate-600", "Outcome of the adsorbate screen on this surface"
+    return (f'<div class="text-xs leading-5 {css}" title="{esc(title)}">'
+            + "<br>".join(esc(p) for p in parts) + "</div>")
+
+
 def step_labels(reaction, reaction_path):
     """Free-energy-diagram x-axis labels lining up with one candidate's
     ``dG_cumulative``, derived from the SAME ``*_PATHWAYS`` step dict
@@ -484,6 +613,8 @@ def summarize(chemical_formula, reaction, reaction_path):
             surf_candidates = candidates_by_surface.get(surf["surface_id"], [])
             surf["reaction_candidates"] = surf_candidates
             surf["best_candidate"] = surf_candidates[0] if surf_candidates else None
+            runs = surf.pop("adsorbate_runs", None) or {}
+            surf["adsorbate_diagnostics"] = (runs.get(reaction) or {}).get(reaction_path)
 
         # per-bulk adsorption agreement, derived from the per-row results (the
         # adsorption analysis stores nothing composition-wide)
@@ -2354,6 +2485,17 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
     n_unc = sum(1 for s in summaries if s["bulk"] and s["bulk"].get("uncertainty"))
     n_surfaces = sum(s["n_surfaces"] for s in summaries)
     n_candidates = sum(s["n_reaction_candidates"] for s in summaries)
+    if n_candidates == 0:
+        reasons = "".join(f"<li>{_html.escape(r)}</li>" for r in no_candidate_reasons(summaries))
+        no_candidate_note = f"""
+            <div class="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+              <p class="font-bold mb-2">No reaction-path candidate was found for this pathway.</p>
+              <ul class="list-disc pl-5 space-y-1">{reasons}</ul>
+              <p class="mt-2 text-amber-800">The per-surface outcome is in the <em>Adsorbate screen</em>
+                column of the per-bulk tables below.</p>
+            </div>"""
+    else:
+        no_candidate_note = ""
     model =next((s["bulk"]["ml_bulk_model"] for s in summaries if s["bulk"]), None)
     bulk_task = _ml_stage_head("bulk_relax")
     surface_model = _ml_surface_model()
@@ -2539,9 +2681,10 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                         <td class="px-4 py-3">{area_cell}</td>
                         <td class="px-4 py-3">{eta_cell}</td>
                         <td class="px-4 py-3">{repeat_cell}</td>
+                        <td class="px-4 py-3">{_adsorbate_screen_cell(surf, esc)}</td>
                       </tr>""")
         surface_rows_html = "".join(surface_rows) or (
-            '<tr><td colspan="7" class="px-4 py-4 text-slate-400 italic">'
+            '<tr><td colspan="8" class="px-4 py-4 text-slate-400 italic">'
             'no stable surfaces found</td></tr>')
 
         if surf_unc_present:
@@ -2585,6 +2728,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                   <th class="px-4 py-3">Best &eta;</th>
                   <th class="px-4 py-3" title="In-plane supercell repeat (nx, ny) the best candidate's clean slab was built on, before the adsorbate was placed">
                     Repeat (n<sub>x</sub>, n<sub>y</sub>)</th>
+                  <th class="px-4 py-3" title="What happened to the adsorption sites on this surface">Adsorbate screen</th>
                 </tr>
               </thead>
               <tbody>{surface_rows_html}</tbody>
@@ -2663,6 +2807,15 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                   <dt class="font-semibold text-slate-900">Repeat (n<sub>x</sub>, n<sub>y</sub>)</dt>
                   <dd>In-plane repetition used to construct the clean slab on which the best adsorption
                     candidate was placed.</dd>
+                </div>
+                <div>
+                  <dt class="font-semibold text-slate-900">Adsorbate screen</dt>
+                  <dd>What happened to the adsorption sites tried on this surface: sites where an adsorbate
+                    could not be placed, relaxations that failed or did not converge, adsorption sets rejected
+                    by the sanity checks (with adsorbate and reason), sets missing a pathway intermediate,
+                    candidates above the &eta; limit, and the number of candidates stored. A rejected or failed
+                    intermediate drops the whole adsorption site. <em>not screened</em>: the surface was not
+                    among the lowest-energy surfaces of its bulk that are screened.</dd>
                 </div>
             </dl>
           </div>"""
@@ -2939,7 +3092,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 <p class="text-xs font-bold text-slate-500 mb-1">Reaction candidates</p>
                 <p class="text-lg font-bold text-slate-900">{n_candidates}</p>
               </div>{robust_tile}{robust_candidates_tile}
-            </div>
+            </div>{no_candidate_note}
             <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-sm text-slate-600 mt-5 pt-5 border-t border-slate-100">{summary_note}
             </dl>
           </div>

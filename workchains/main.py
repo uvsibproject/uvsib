@@ -621,6 +621,17 @@ class MainWorkChain(WorkChain):
         wch = self.ctx.adsorbates
         row = self.ctx.dbcomposition_row
         path = ["adsorbates", self.ctx.reaction.value, self.ctx.reaction_path.value]
+        no_candidates = WorkflowFactory("adsorbates").exit_codes.NO_CANDIDATES_WITHIN_ETA_LIMIT.status
+        if wch.exit_status == no_candidates:
+            # A result, not a crash: every surface was screened but no candidate
+            # passed (eta limit, sanity checks, missing intermediates -- see the
+            # per-surface diagnostics). Finish the step so the pipeline report
+            # is still written and explains why; AKMC skips itself (no rows).
+            update_step_status_path(DBComposition, row.uuid, path, "Done")
+            update_row(DBComposition, row.uuid, {"status": "Done"})
+            self.report("Adsorbates WorkChain found no reaction-path candidate; "
+                        "continuing to the pipeline report")
+            return
         if not wch.is_finished_ok:
             update_step_status_path(DBComposition, row.uuid, path, "Failed")
             update_row(DBComposition, row.uuid, {"status": "Failed"})

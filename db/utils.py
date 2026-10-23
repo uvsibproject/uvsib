@@ -1,4 +1,5 @@
 import re
+import json
 from itertools import combinations
 from sqlalchemy import inspect, delete, text, func, not_
 from pymatgen.core import Composition, Structure
@@ -472,6 +473,39 @@ def update_json_path(table_class, uuid_value, column, path, value):
     ``column`` and the keys are restricted to a safe identifier charset;
     ``value`` must be a string.
     """
+    if not isinstance(value, str):
+        raise ValueError("value must be a string")
+    expr = _nested_jsonb_set(column, path, "to_jsonb(CAST(:val AS text))")
+
+    query = text(
+        f"UPDATE {table_class.__tablename__} "
+        f"SET {column} = {expr} WHERE uuid = :uuid"
+    )
+    with get_session() as session:
+        session.execute(query, {"uuid": str(uuid_value), "val": value})
+        session.commit()
+
+
+def update_json_path_by_id(table_class, row_id, column, path, value):
+    """Like :func:`update_json_path`, for tables keyed by an integer ``id``
+    (e.g. DBSurface) and for any JSON-serialisable ``value`` (dicts, lists,
+    numbers, ...). Same single atomic ``jsonb_set`` UPDATE, so sibling keys
+    written concurrently by parallel workchains are preserved."""
+    expr = _nested_jsonb_set(column, path, "CAST(:val AS jsonb)")
+
+    query = text(
+        f"UPDATE {table_class.__tablename__} "
+        f"SET {column} = {expr} WHERE id = :id"
+    )
+    with get_session() as session:
+        session.execute(query, {"id": int(row_id), "val": json.dumps(value)})
+        session.commit()
+
+
+def _nested_jsonb_set(column, path, value_sql):
+    """Nested ``jsonb_set`` SQL expression setting ``column`` at ``path`` to
+    ``value_sql``, creating missing parents and keeping existing siblings.
+    ``column`` and the keys are restricted to a safe identifier charset."""
     if not path:
         raise ValueError("path must be a non-empty list of keys")
     if not _SAFE_JSON_COLUMN.match(column):
@@ -479,13 +513,11 @@ def update_json_path(table_class, uuid_value, column, path, value):
     for key in path:
         if not _SAFE_STEP_KEY.match(key):
             raise ValueError(f"unsafe {column} key: {key!r}")
-    if not isinstance(value, str):
-        raise ValueError("value must be a string")
 
     # Build the nested jsonb_set expression from the innermost key outward, so
     # each level coalesces the existing sub-object (or '{}') -> missing parents
     # are created and existing siblings are kept.
-    expr = "to_jsonb(CAST(:val AS text))"
+    expr = value_sql
     for i in range(len(path) - 1, -1, -1):
         leaf_arr = "'{" + path[i] + "}'::text[]"
         parent = path[:i]
@@ -495,14 +527,7 @@ def update_json_path(table_class, uuid_value, column, path, value):
         else:
             existing = f"COALESCE({column}, '{{}}'::jsonb)"
         expr = f"jsonb_set({existing}, {leaf_arr}, {expr}, true)"
-
-    query = text(
-        f"UPDATE {table_class.__tablename__} "
-        f"SET {column} = {expr} WHERE uuid = :uuid"
-    )
-    with get_session() as session:
-        session.execute(query, {"uuid": str(uuid_value), "val": value})
-        session.commit()
+    return expr
 
 
 def update_step_status_path(table_class, uuid_value, path, value):

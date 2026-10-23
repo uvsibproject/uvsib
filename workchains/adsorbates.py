@@ -1,9 +1,11 @@
+from collections import Counter
+from datetime import datetime, timezone
 from ase.io import jsonio
 from aiida.engine import WorkChain, if_
 from aiida.plugins import WorkflowFactory
 from aiida.orm import Str, List, Dict
 from uvsib.db.tables import DBSurface
-from uvsib.db.utils import add_surface_ml_adsorbate
+from uvsib.db.utils import add_surface_ml_adsorbate, update_json_path_by_id
 from uvsib.db.utils import query_by_columns
 from uvsib.workchains.utils import get_code, get_model_device
 from uvsib.workchains.oer import calculate_oer_overpotential
@@ -16,6 +18,25 @@ from uvsib.workchains.orr import calculate_orr_overpotential
 from uvsib.workflows import settings
 
 MAX_NUM_ADS = settings.MAX_NUM_ADS
+
+
+def _reason_key(rec):
+    """(adsorbate, reason) of one rejected.json record, with the numbers
+    stripped from the reason so equal failures group together."""
+    reason = str(rec.get("reason") or "unknown")
+    ads = rec.get("adsorbate")
+    if reason.startswith("energy outlier for "):
+        ads = ads or reason[len("energy outlier for "):].split(":")[0]
+        reason = "energy outlier"
+    reason = reason.split(" (max displacement")[0]
+    return ads or "?", reason
+
+
+def rejected_counts(rejected):
+    """rejected.json records -> [{"adsorbate", "reason", "count"}, ...], most frequent first."""
+    counts = Counter(_reason_key(rec) for rec in rejected)
+    return [{"adsorbate": ads, "reason": reason, "count": n}
+            for (ads, reason), n in counts.most_common()]
 
 # reaction -> (overpotential calculator, eta storage threshold in V); shared
 # with AdsorptionUncertaintyWorkChain so committee models go through exactly
@@ -88,9 +109,11 @@ class AdsorbatesWorkChain(WorkChain):
             sfe = slab_row.formation_energy if slab_row.formation_energy is not None else float("inf")
             by_uuid.setdefault(str(structure_uuid), []).append((sfe, slab_row, surface_id))
 
+        self.ctx.not_screened = []
         for uid, rows in by_uuid.items():
             rows.sort(key=lambda x: x[0])
             considered = rows[:MAX_NUM_ADS]
+            self.ctx.not_screened.extend((uid, str(fid)) for _, _, fid in rows[MAX_NUM_ADS:])
             self.report(f"uuid={uid}: {len(considered)} surface(s) considered "
                         f"(of {len(rows)} available)")
             for sfe, row, fid in considered:
@@ -100,22 +123,59 @@ class AdsorbatesWorkChain(WorkChain):
                 self.to_context(**{f"{uid}_{fid}": future})
 
     def inspect_adsorbs(self):
-        """Inspect Adsorbates WorkChain"""
+        """Inspect Adsorbates WorkChain and start the per-surface diagnostics"""
         failed = []
+        # surface_id -> what happened to its adsorption sets; completed in
+        # store_results_ml and saved to DBSurface.attributes for the pipeline report
+        self.ctx.diagnostics = {fid: {"bulk_uuid": uid, "job": "not_screened", "max_num_ads": MAX_NUM_ADS}
+                                for uid, fid in self.ctx.get("not_screened", [])}
         for uid, fid in self.ctx.selected_surfaces:
             ads_wch = self.ctx[f"{uid}_{fid}"]
             if not ads_wch.is_finished_ok:
                 failed.append(f"{uid}_{fid} (exit status: {ads_wch.exit_status})")
+                self.ctx.diagnostics[fid] = {"bulk_uuid": uid, "job": "failed",
+                                             "exit_status": ads_wch.exit_status}
                 continue
 
             output_dict = ads_wch.outputs.output_dict
             self.ctx.ml_results[f"{str(uid)}_{fid}"] = output_dict["structures"]
+            out = output_dict.get_dict()
+            self.ctx.diagnostics[fid] = {
+                "bulk_uuid": uid,
+                "job": "ok",
+                "summary": out.get("summary"),   # None for jobs run before the summary existed
+                "rejected": rejected_counts(out.get("rejected") or []),
+                "n_missing_intermediate": 0,
+                "missing_intermediates": {},
+                "n_eta_above": 0,
+                "min_eta": None,
+                "n_stored": 0,
+            }
 
         if len(failed) == len(self.ctx.selected_surfaces):
             self.report("ERROR: all sub-workflows failed - no results to process.")
+            self._save_diagnostics()
             return self.exit_codes.ERROR_CALCULATION_FAILED
         if failed:
             self.report(f"WARNING: {len(failed)} sub-workflow(s) failed.")
+
+    def _save_diagnostics(self):
+        """Report the per-surface diagnostics and store them under
+        DBSurface.attributes["adsorbates"][reaction][reaction_path]. Advisory:
+        a failed write only warns."""
+        from uvsib.workchains.pipeline_report import adsorbate_diagnostic_parts
+
+        ctime = datetime.now(timezone.utc).isoformat()
+        path = ["adsorbates", self.ctx.reaction, self.ctx.reaction_path]
+        for fid, diag in self.ctx.diagnostics.items():
+            diag = dict(diag, ctime=ctime)
+            if diag["job"] != "not_screened":
+                self.report(f"uuid={diag['bulk_uuid']}, surface {fid}: "
+                            + "; ".join(adsorbate_diagnostic_parts(diag)))
+            try:
+                update_json_path_by_id(DBSurface, int(fid), "attributes", path, diag)
+            except Exception as exc:
+                self.report(f"WARNING: could not store adsorbate diagnostics for surface {fid}: {exc}")
 
     def store_results_ml(self):
         """Store ML results """
@@ -143,9 +203,13 @@ class AdsorbatesWorkChain(WorkChain):
                     adsorbed = jsonio.decode(ads_json)
                     energy_set[adsorbed.info["adsorbate"]] = adsorbed.info['{}_energy'.format(str(settings.inputs['adsorbates']['model']).lower())]
 
+                diag = self.ctx.diagnostics[surface_id]
                 try:
                     eta, dG_steps, dG_cumulative = calc_method(energy_set, self.ctx.reaction_path)
                 except KeyError as missing:
+                    name = str(missing.args[0])
+                    diag["n_missing_intermediate"] += 1
+                    diag["missing_intermediates"][name] = diag["missing_intermediates"].get(name, 0) + 1
                     # A pathway intermediate is absent from the relaxed set -- e.g.
                     # a fragile dimer like *N2O2 that dissociated during relaxation
                     # and was dropped by the adsorbate validator. Skip THIS
@@ -158,9 +222,13 @@ class AdsorbatesWorkChain(WorkChain):
                         f"(have: {sorted(energy_set)}).")
                     continue
 
+                if diag["min_eta"] is None or eta < diag["min_eta"]:
+                    diag["min_eta"] = float(eta)
                 if eta > eta_threshold:
+                    diag["n_eta_above"] += 1
                     continue
 
+                diag["n_stored"] += 1
                 self.ctx.candidates += 1
                 add_surface_ml_adsorbate(existing_uuid=uuid_str, surf_id=surface_id, surface_miller_index=miller_index,
                                          comp=self.ctx.chemical_formula,
@@ -168,6 +236,11 @@ class AdsorbatesWorkChain(WorkChain):
                                          site_type=site_type, ads_coord=ads_coord, repeat=repeat,
                                          e=eta, dG_steps=dG_steps, dG_cumulative=dG_cumulative,
                                          ad_set=adsorb_set)
+
+        for diag in self.ctx.diagnostics.values():
+            if diag["job"] == "ok":
+                diag["eta_limit"] = float(eta_threshold)
+        self._save_diagnostics()
 
     def should_run_uncertainty(self):
         """Committee eta uncertainty (AdsorptionUncertaintyWorkChain). Opt-in via
@@ -228,6 +301,17 @@ class AdsorbatesWorkChain(WorkChain):
             "reaction": reaction,
             "pathway": pathway
         }
+        # post-relaxation sanity checks, see docs/sanity_checks.md
+        cfg = settings.inputs[relax_key]
+        job_info.update({
+            "validate": bool(cfg.get("validate", False)),
+            "check_slab_integrity": bool(cfg.get("check_slab_integrity", False)),
+            "check_energy_outliers": bool(cfg.get("check_energy_outliers", False)),
+            "bind_tol": cfg.get("bind_tol"),
+            "graph_tol": cfg.get("graph_tol"),
+            "slab_max_disp": cfg.get("slab_max_disp"),
+            "energy_mad_factor": cfg.get("energy_mad_factor"),
+        })
 
         builder.job_info = Dict(job_info)
         return builder
