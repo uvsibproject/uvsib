@@ -26,7 +26,9 @@ def get_cmdline(job_info):
         )
     elif job_type == 'hopping':
         cmdline.extend([
-            f"--mh_steps={job_info['mh_steps']}"
+            f"--mh_steps={job_info['mh_steps']}",
+            f"--fmax={job_info['fmax']}",
+            f"--max_seconds={job_info['max_seconds']}"
         ])
     elif job_type == 'face_build':
         cmdline.extend([

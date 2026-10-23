@@ -16,6 +16,8 @@ from uvsib.workflows import settings
 StructureData = DataFactory('core.structure')
 
 EHULL_ML = settings.EHULL_ML
+# seconds reserved between the MH runner's wall-clock budget and the SLURM walltime
+MH_WALLTIME_MARGIN = 1800
 
 class CSPWorkChain(WorkChain):
     """WorkChain for Crystal Structure Prediction (CSP)"""
@@ -35,6 +37,8 @@ class CSPWorkChain(WorkChain):
             cls.collect_ml_energies,
             cls.minimahopping,
             cls.mh_energies,
+            cls.relax_mh_structures,
+            cls.collect_mh_relax,
             cls.final_step,
             cls.final_report
         )
@@ -191,7 +195,44 @@ class CSPWorkChain(WorkChain):
             self.report("Many MH jobs failed.")
             return self.exit_codes.ERROR_MINIMAHOPPING_FAILED
 
-        self.ctx.low_energy_entries_mh, _ = unique_low_energy_comp(self.ctx.chemical_formula, all_mh_entries,
+        self.ctx.mh_structures = [entry.structure.as_dict() for entry in all_mh_entries]
+
+    def relax_mh_structures(self):
+        """Re-relax the MH minima with the bulk_relax protocol.
+
+        MinimaHopping keeps minima whose geometry optimization hit opt_max_steps
+        without converging, and its force criterion differs from the ASE one of
+        relax.py. Relaxing them with the same model / fmax / max_steps as every
+        other bulk drops the unconverged ones and keeps the hull consistent.
+        """
+        self.report(f"Re-relaxing {len(self.ctx.mh_structures)} MH minima with {self.ctx.ml_bulk_model}")
+        builder = self._construct_ML_relax_builder(self.ctx.mh_structures)
+        builder.local_label = Str("relax MH {}".format(self.ctx.chemical_formula))
+        self.to_context(**{"ml_e_mh": self.submit(builder)})
+
+    def collect_mh_relax(self):
+        """Select the low-energy MH structures that converged in the re-relaxation"""
+        wch = self.ctx.ml_e_mh
+        if not wch.is_finished_ok:
+            self.report("ML relaxation of the MH minima failed.")
+            return self.exit_codes.ERROR_ML_RELAX_FAILED
+        try:
+            mh_entries = get_output_as_entry(wch)
+        except Exception:
+            self.report("ML relaxation of the MH minima failed.")
+            return self.exit_codes.ERROR_ML_RELAX_FAILED
+
+        n_dropped = len(self.ctx.mh_structures) - len(mh_entries)
+        if n_dropped:
+            self.report(f"{n_dropped} of {len(self.ctx.mh_structures)} MH minima did not converge "
+                        "in the re-relaxation and were dropped.")
+
+        if not mh_entries:
+            self.report("Warning: no MH minimum converged; continuing with the CSP structures only.")
+            self.ctx.low_energy_entries_mh = []
+            return
+
+        self.ctx.low_energy_entries_mh, _ = unique_low_energy_comp(self.ctx.chemical_formula, mh_entries,
                                                                    EHULL_ML,
                                                                    element_entries=self.ctx.ref_entries)
 
@@ -308,6 +349,16 @@ class CSPWorkChain(WorkChain):
         builder.this_label = '{}'.format(self.ctx.chemical_formula)
         model, model_path, device = get_model_device(settings.inputs["MinimaHopping"]["model"])
 
+        # MH runner wall-clock budget: the SLURM walltime of the MinimaHopping
+        # code minus MH_WALLTIME_MARGIN, so the runner stops and writes
+        # output.json well before the scheduler kills the job.
+        walltime = int(settings.configs["codes"]["MinimaHopping"]["job_script"]["time"])
+        max_seconds = walltime - MH_WALLTIME_MARGIN
+        if max_seconds <= 0:
+            raise ValueError(
+                f"codes.MinimaHopping.job_script.time={walltime}s in config.yaml must exceed "
+                f"the {MH_WALLTIME_MARGIN}s MinimaHopping wall-clock margin.")
+
         job_info = {
             "job_type": "hopping",
             "ML_model": settings.inputs["MinimaHopping"]["model"],
@@ -315,7 +366,9 @@ class CSPWorkChain(WorkChain):
             "model_path": model_path,
             "model_head": settings.inputs["MinimaHopping"]["head"],
             "device": device,
-            "mh_steps": settings.inputs["MinimaHopping"]["mh_steps"]
+            "mh_steps": settings.inputs["MinimaHopping"]["mh_steps"],
+            "fmax": settings.inputs["MinimaHopping"]["fmax"],
+            "max_seconds": max_seconds
         }
 
         builder.job_info = Dict(job_info)

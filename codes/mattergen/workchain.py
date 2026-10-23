@@ -4,9 +4,9 @@ from aiida.orm import Str, Dict, Code
 from aiida.plugins import CalculationFactory
 from uvsib.workflows import settings
 
-def get_options():
-    """Return scheduler options"""
-    job_script = settings.configs['codes']['MatterGen_CSP']['job_script']
+def get_options(code_key):
+    """Return scheduler options from the config.yaml codes.<code_key>.job_script block"""
+    job_script = settings.configs['codes'][code_key]['job_script']
     resources = {
         'num_machines': job_script['nodes'],
         'num_mpiprocs_per_machine': job_script['ntasks'],
@@ -106,7 +106,7 @@ class MatterGenBaseWorkChain(BaseRestartWorkChain):
             'code': self.inputs.code,
             'parameters': Dict(dict={'cmdline_params': cmdline}),
             'metadata': {
-                'options': get_options(),
+                'options': get_options('MatterGen_generate'),
                 'label': 'MatterGen: {}'.format(chemical_system)
             }
         }
@@ -154,7 +154,7 @@ class MatterGenCSPWorkChain(BaseRestartWorkChain):
             'code': self.inputs.code,
             'parameters': Dict(dict={'cmdline_params': cmdline}),
             'metadata': {
-                'options': get_options(),
+                'options': get_options('MatterGen_CSP'),
                 'label': 'MatterGen: CSP for {}'.format(chemical_formula)
             }
         }

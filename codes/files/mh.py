@@ -30,9 +30,12 @@ from minimahopping.minhop import Minimahopping
 #   3. metal-appropriate fingerprint so escapes actually succeed
 #      (lower fingerprint_threshold, add p-orbitals, wider width_cutoff).
 #
-# Every knob below is overridable via an environment variable so the values can
-# be tuned per element/walltime without editing code (set them e.g. through the
-# AiiDA code's `prepend_text` / computer environment_variables).
+# fmax and the wall-clock budget come from the workflow (--fmax from
+# input.yaml MinimaHopping.fmax, --max_seconds from config.yaml
+# codes.MinimaHopping.job_script.time minus 30 min). The remaining knobs are
+# overridable via an environment variable so the values can be tuned per
+# element/walltime without editing code (set them e.g. through the AiiDA
+# code's `prepend_text` / computer environment_variables).
 # ---------------------------------------------------------------------------
 
 def _envf(name, default):
@@ -50,22 +53,21 @@ def _envi(name, default):
 
 # Total wall-clock the runner may use.  MUST be < the SLURM walltime of the job
 # so the salvage step can write output.json before the scheduler SIGTERMs us.
-# Default 10000 s (~2.75 h): a modern MLIP needs no more than that for this
-# problem.  Raise MH_MAX_SECONDS (still below the SLURM walltime) for larger
-# cells; the metal-safe params below are what keep a run from needing it.
+# Normally set by --max_seconds (SLURM walltime - 30 min); this value is only
+# the fallback for a manual run without --max_seconds.
 MH_MAX_SECONDS = _envi("MH_MAX_SECONDS", 10000)
 # Time reserved at the end for stopping MH and writing output.json.
 MH_SALVAGE_MARGIN = _envi("MH_SALVAGE_MARGIN", 180)
 
 
-def metal_mh_parameters():
+def mh_parameters(fmax, max_seconds):
     """MinimaHopping kwargs tuned to terminate on metals and to bound cost."""
     return dict(
         # --- cost caps per escape iteration (default 10000 each) -------------
         md_max_steps=_envi("MH_MD_MAX_STEPS", 200),
         opt_max_steps=_envi("MH_OPT_MAX_STEPS", 200),
         mdmin=_envi("MH_MDMIN", 2),          # stop MD after 2 minima (default 2; was 5)
-        fmax=_envf("MH_FMAX", 0.05),         # MLIP force noise makes 0.005 hard on metals
+        fmax=fmax,
         dt0=_envf("MH_DT0", 0.08),
         # --- make the escape test resolve metallic minima -------------------
         # energies of distinct metallic minima are tiny: keep the energy gate
@@ -79,7 +81,7 @@ def metal_mh_parameters():
         T0=_envf("MH_T0", 1000.0),
         symprec=0.05,
         # --- in-loop budget (checked between hops); SIGALRM is the backstop --
-        run_time=_format_runtime(max(MH_MAX_SECONDS - MH_SALVAGE_MARGIN - 60, 60)),
+        run_time=_format_runtime(max(max_seconds - MH_SALVAGE_MARGIN - 60, 60)),
         # --- keep the run lean and self-contained ---------------------------
         use_MPI=False,
         new_start=True,
@@ -126,7 +128,7 @@ def pmg_to_ase(pmg_structure):
     return Atoms(symbols=symbols, scaled_positions=scaled_positions, cell=cell, pbc=True)
 
 
-def run_mh(calc, mh_steps):
+def run_mh(calc, mh_steps, fmax, max_seconds):
     """Run MinimaHopping under a hard wall-clock watchdog.
 
     The accepted minima are appended to output/accepted_minima.extxyz by
@@ -141,8 +143,8 @@ def run_mh(calc, mh_steps):
     init_conf = pmg_to_ase(pmg_structure)
     init_conf.calc = calc
 
-    params = metal_mh_parameters()
-    budget = max(MH_MAX_SECONDS - MH_SALVAGE_MARGIN, 1)
+    params = mh_parameters(fmax, max_seconds)
+    budget = max(max_seconds - MH_SALVAGE_MARGIN, 1)
     print("MH runner: wall-clock budget {:d}s (alarm), params: {}".format(
         budget, {k: params[k] for k in
                  ("md_max_steps", "opt_max_steps", "mdmin", "fmax",
@@ -184,13 +186,15 @@ if __name__ == "__main__":
     parser.add_argument("--task_name", type=str, default=None)
     parser.add_argument("--mh_steps", type=str)
     parser.add_argument("--device", type=str)
+    parser.add_argument("--fmax", type=float, default=_envf("MH_FMAX", 0.05))
+    parser.add_argument("--max_seconds", type=int, default=MH_MAX_SECONDS)
     args = parser.parse_args()
 
     from _calculators import make_calculator
     calc = make_calculator(ml_model=args.ML_model, model=args.model, model_path=args.model_path,
                            device=args.device, task_name=args.task_name)
 
-    run_mh(calc, args.mh_steps)
+    run_mh(calc, args.mh_steps, args.fmax, args.max_seconds)
 
     # Salvage: read whatever MinimaHopping accepted (flushed incrementally).
     # accepted_minima[0] is the initial relaxed structure -> skip with [1:].
