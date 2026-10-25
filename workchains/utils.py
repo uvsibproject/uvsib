@@ -6,12 +6,14 @@ from pymatgen.entries.computed_entries import ComputedStructureEntry
 from pymatgen.analysis.structure_matcher import StructureMatcher
 from pymatgen.analysis.phase_diagram import PhaseDiagram
 from pymatgen.symmetry.analyzer import SpacegroupAnalyzer, SymmetryUndeterminedError
-from uvsib.codes.utils import get_element_entries, get_structures_from_mpdb_by_composition
-from uvsib.db.utils import query_structure, add_structures
+from uvsib.codes.utils import (get_element_entries, get_structures_from_mpdb_by_composition,
+                               get_structures_from_mpdb_by_chemsys)
+from uvsib.db.utils import query_structure, add_structures, get_chemical_systems, get_existing_mp_ids
 from uvsib.workflows import settings
 
 
 EHULL_SCAN = settings.EHULL_SCAN
+EHULL_SCAN_CHEMSYS = settings.EHULL_SCAN_CHEMSYS
 DFT_FUNC = settings.DFT_FUNC
 
 matcher = StructureMatcher(
@@ -264,8 +266,31 @@ def unique_low_energy_comp(chemical_formula, entries, ehull, min_n_return=None, 
                 ehulls.append(eh)
     return stable_entries, ehulls
 
+def _add_new_mpdb_structures(source, structures):
+    """Store MPDB ``(structure_dict, mp_id)`` pairs whose mp_id is not in the
+    database yet (as primitive cells, method DFT). Returns the number added."""
+    known = get_existing_mp_ids([mp_id for _, mp_id in structures])
+    new = [(s, mp_id) for s, mp_id in structures if not mp_id or mp_id not in known]
+    if new:
+        add_structures(source, "DFT",
+                       [(get_primitive_cell(s).as_dict(), None) for s, _ in new],
+                       mp_ids=[mp_id for _, mp_id in new])
+    return len(new)
+
+def competing_chemical_systems(chemical_formula):
+    """Every multi-element subsystem of ``chemical_formula`` (elements are
+    covered by the MPDB_ref references), including its own full system."""
+    chemical_systems, _ = get_chemical_systems(chemical_formula)
+    return [cs for cs in chemical_systems if "-" in cs]
+
 def add_from_mpdb(chemical_formula):
-    """Add missing stable and experimental structures and their reference elements from MPDB."""
+    """Add missing stable and experimental structures and their reference elements from MPDB.
+
+    With ``settings.MPDB_CHEMSYS_ENABLED``, also add the MPDB structures of
+    every other composition in the target's subsystems (competing phases).
+    A failed competing-phase query is not fatal: the hull then rests on the
+    generated structures alone. Returns ``(n_competing_added, error)``.
+    """
     results = query_structure({"composition": chemical_formula}, method = "DFT")
     existing_sources = {result.source for result in results}
 
@@ -282,13 +307,9 @@ def add_from_mpdb(chemical_formula):
             )
         )
     if missing_stb and stb_structures:
-        structures = [(get_primitive_cell(structure).as_dict(), None) for structure, _ in stb_structures ]
-        mp_ids = [mp_id for _, mp_id in stb_structures]
-        add_structures("MPDB_stb", "DFT", structures, mp_ids=mp_ids)
+        _add_new_mpdb_structures("MPDB_stb", stb_structures)
     if missing_exp and exp_structures:
-        structures = [(get_primitive_cell(structure).as_dict(), None) for structure, _ in exp_structures ]
-        mp_ids = [mp_id for _, mp_id in exp_structures]
-        add_structures("MPDB_exp", "DFT", structures, mp_ids=mp_ids)
+        _add_new_mpdb_structures("MPDB_exp", exp_structures)
     # add reference structures (elements)
     elements = Composition(chemical_formula).chemical_system.split("-")
     missing_el = []
@@ -301,6 +322,18 @@ def add_from_mpdb(chemical_formula):
     el_entries = get_element_entries(missing_el, DFT_FUNC)
     el_structures = [(e.structure.as_dict(), None) for e in el_entries]
     add_structures("MPDB_ref", "DFT", el_structures)
+
+    # competing phases: every composition of every multi-element subsystem
+    if not settings.MPDB_CHEMSYS_ENABLED:
+        return 0, None
+    try:
+        stb_structures, exp_structures = get_structures_from_mpdb_by_chemsys(
+            competing_chemical_systems(chemical_formula), EHULL_SCAN_CHEMSYS)
+    except Exception as exc:
+        return 0, str(exc)
+    n_added = (_add_new_mpdb_structures("MPDB_stb", stb_structures)
+               + _add_new_mpdb_structures("MPDB_exp", exp_structures))
+    return n_added, None
 
 def get_code(model_key):
     """

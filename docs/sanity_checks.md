@@ -195,6 +195,13 @@ Tighten only if junk slips through.
   bonds. If layer 2b false-rejects one of these, it is logged in
   `rejected.json` with a clear reason and can be tuned via `graph_tol` -- the
   fragmentation check (2a) is unaffected and still catches dissociation.
+- **Broken reference geometries.** If a reference adsorbate is not one
+  connected molecule at `graph_tol` (a bond in the library geometry is longer
+  than the cutoff), layer 2 is skipped for that adsorbate, a warning is printed
+  and the name is listed under `identity_check_skipped` in the job summary
+  (shown in the pipeline report). Otherwise every intact adsorbate would be
+  rejected. This happened for the OER `*OH` (O-H 1.28 A, fixed to 0.97 A on
+  2026-10-23).
 - **Intended water release etc.** happens *across* pathway steps as separate
   species, never within a single adsorbate relaxation, so "intact" is the
   correct per-structure criterion.

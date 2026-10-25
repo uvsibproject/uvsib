@@ -27,6 +27,18 @@ EHULL_ML = 0.1
 EHULL_SCAN = 0.1
 DFT_FUNC = 'GGA'  # GGA/r2SCAN
 
+# Competing phases from the Materials Project: besides the target formula's own
+# polymorphs, MPDBMLWorkChain fetches every MP structure within
+# `chemsys_ehull` (eV/atom) of the MP hull in each multi-element subsystem of
+# the target (e.g. Ba-O, O-Ti, Ba-Ti, Ba-O-Ti for BaTiO3) and ML-relaxes it,
+# so the ML hull does not depend only on MatterGen/GNoME finding every
+# competing phase. Stored as MPDB_stb/MPDB_exp under their own composition.
+# Configured in input.yaml under `mpdb: {chemsys_enabled: ..., chemsys_ehull: ...}`;
+# defaults ON with the EHULL_SCAN window.
+_mpdb = inputs.get('mpdb', {}) or {}
+MPDB_CHEMSYS_ENABLED = bool(_mpdb.get('chemsys_enabled', True))
+EHULL_SCAN_CHEMSYS = float(_mpdb.get('chemsys_ehull', EHULL_SCAN))
+
 # Run the GNoME (SAPS) generator in parallel with MatterGen in the gen + csp
 # paths. Opt-in via input.yaml (`gnome: {enabled: true}`); defaults off so
 # existing runs without the block are unaffected.

@@ -296,6 +296,17 @@ def query_structure(structure_filters, *, include_singlepoints=False, **version_
 
         return query.all()
 
+def get_existing_mp_ids(mp_ids):
+    """Subset of ``mp_ids`` already stored on a DBStructureVersion row."""
+    mp_ids = [m for m in mp_ids if m]
+    if not mp_ids:
+        return set()
+    with get_session() as session:
+        rows = (session.query(DBStructureVersion.mp_id)
+                .filter(DBStructureVersion.mp_id.in_(mp_ids))
+                .distinct().all())
+    return {row[0] for row in rows}
+
 def query_structureversions_by_attributes(**filters):
     """Query DBStructureVersion with flexible filters (method, energy, etc)"""
     with get_session() as session:
@@ -407,6 +418,33 @@ def query_by_columns(table_class, filters):
     return result
 
 ####################################
+
+# DBChemsys.gen_structures states written by GeneratorWorkChain:
+#   None    -- generation not finished yet (in progress, or never started)
+#   "Ready" -- generated structures stored
+#   "Empty" -- generators ran but produced nothing usable; a legitimate result
+#              (many subsystems have no stable compound), kept so the system
+#              is not regenerated on every request
+#   "Failed"-- a generator or ML job crashed; retried on a later request once
+#              reset_orphaned_chemsys() removes the row
+GEN_READY = "Ready"
+GEN_EMPTY = "Empty"
+GEN_FAILED = "Failed"
+GEN_DONE = (GEN_READY, GEN_EMPTY)                  # finished, never regenerated
+GEN_TERMINAL = (GEN_READY, GEN_EMPTY, GEN_FAILED)  # nothing more will be written
+
+def set_chemsys_status(chemical_system, status):
+    """Set DBChemsys.gen_structures for ``chemical_system``; False if no row."""
+    rows = query_by_columns(DBChemsys, {"chemsys": chemical_system})
+    if not rows:
+        return False
+    update_row(DBChemsys, rows[0].uuid, {"gen_structures": status})
+    return True
+
+def get_chemsys_status(chemical_system):
+    """DBChemsys.gen_structures for ``chemical_system``, or "Missing" if no row."""
+    rows = query_by_columns(DBChemsys, {"chemsys": chemical_system})
+    return rows[0].gen_structures if rows else "Missing"
 
 def get_chemical_systems(chemical_formula):
     """Given a chemical formula, return either all or new chemical systems"""

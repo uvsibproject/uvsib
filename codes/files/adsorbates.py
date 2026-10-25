@@ -278,6 +278,13 @@ def _adsorbate_reference_graph(ads_molecule, tol: float = _ADSORBATE_BOND_TOL):
     return _bond_graph(numbers, positions, tol)
 
 
+def reference_graph_ok(graph) -> bool:
+    """True if a reference adsorbate graph is usable for the identity check:
+    every bundled adsorbate is one connected molecule."""
+    import networkx as nx
+    return graph.number_of_nodes() <= 1 or nx.is_connected(graph)
+
+
 def validate_relaxed_adsorbate(atoms: Atoms, n_ads: int, expected_graph,
                                energy, *, graph_tol: float = _ADSORBATE_BOND_TOL,
                                bind_tol: float = 1.25, overlap_scale: float = 0.5,
@@ -335,6 +342,11 @@ def validate_relaxed_adsorbate(atoms: Atoms, n_ads: int, expected_graph,
             return AdsorbateValidation(False, "desorbed (no adsorbate-slab bond)")
 
     # --- Layer 2: molecular identity (intramolecular bond graph) ---
+    # A disconnected reference graph means the library geometry itself is bad
+    # (bond longer than the cutoff); comparing against it would reject every
+    # intact adsorbate, so the identity check is skipped for it.
+    if not reference_graph_ok(expected_graph):
+        return AdsorbateValidation(True, "")
     got_graph = _subset_bond_graph(atoms, ads_idx, graph_tol)
     # 2a: fragmentation -- an intact adsorbate is a single connected component.
     if got_graph.number_of_nodes() > 1 and not nx.is_connected(got_graph):
@@ -542,10 +554,10 @@ def generate_oer_adsorbates():
     mol.properties = {"adsorbate": "*O", "energy": 0}
     adsorbates.append(mol)
 
-    # *OH
+    # *OH (O-H = 0.97 A; was 1.28 A, which the identity check reads as no bond)
     mol = Molecule(
         [X, "O", "H"],
-        [(0, 0, 0), (0, 0, 2.0), (0.1, 0.9, 2.9)],
+        [(0, 0, 0), (0, 0, 2.0), (0.08, 0.68, 2.68)],
     )
     mol.properties = {"adsorbate": "*OH", "energy": 0}
     adsorbates.append(mol)
@@ -609,15 +621,17 @@ def generate_co2rr_adsorbates(pathway_name: str) -> tuple:
 
     def _cooh():
         """*COOH (carboxyl) — C-down, bidentate capable.
-        Planar: C at origin, C=O pointing up, C-OH in-plane.
+        Planar sp2 C at origin: surface bond down, C=O (1.22 Å) and C–OH
+        (1.35 Å) both 120° from it, O–H 0.97 Å (C–O–H 106°). The earlier
+        geometry put the OH oxygen 0.6 Å below C, i.e. into the surface.
         """
         return _create_adsorbate_with_dummy(
             ["C", "O", "O", "H"],
             [
                 [0.00, 0.00, 0.00],
-                [0.00, 0.00, 1.22],
-                [1.10, 0.00, -0.60],
-                [1.94, 0.00, -0.12],
+                [-1.06, 0.00, 0.61],
+                [1.17, 0.00, 0.68],
+                [0.93, 0.00, 1.62],
             ],
             properties={"adsorbate": "*COOH"}
         )
@@ -766,14 +780,18 @@ def generate_co2rr_adsorbates(pathway_name: str) -> tuple:
         )
 
     def _ccho():
-        """*CCHO — C-down, C2 species."""
+        """*CCHO — C-down, C2 species: surface C bonded to a CHO group.
+        C–C 1.45 Å; sp2 C(=O)H with C=O 1.22 Å and C–H 1.10 Å at 120°. The
+        earlier geometry put H 1.15 Å from O as well as C, so the identity
+        check expected an O–H bond that an intact *CCHO does not have.
+        """
         return _create_adsorbate_with_dummy(
             ["C", "C", "O", "H"],
             [
                 [0.00, 0.00, 0.00],
-                [0.00, 1.35, 0.65],
-                [0.00, 2.40, 1.30],
-                [0.00, 1.35, 1.76],
+                [0.00, 0.00, 1.45],
+                [0.00, 1.06, 2.06],
+                [0.00, -0.95, 2.00],
             ],
             properties={"adsorbate": "*CCHO"}
         )
@@ -1186,14 +1204,19 @@ def generate_noxrr_adsorbates(pathway_name: str) -> tuple:
         )
 
     def _n2o2():
-        """*ONNO (cis-hyponitrite dimer, N-down) — O=N–N=O bridge species."""
+        """*ONNO (cis-hyponitrite dimer, N-down) — O=N–N=O bridge species.
+
+        N–N 1.30 Å, N–O 1.20 Å, O splayed outward (O...O 2.4 Å); the earlier
+        rectangle put the two O 1.30 Å apart, which the identity check read as
+        an O–O bond (a 4-ring).
+        """
         return _create_adsorbate_with_dummy(
             ["N", "O", "N", "O"],
             [
                 [0.00, 0.00, 0.00],
-                [0.00, 0.00, 1.18],
+                [-0.55, 0.00, 1.07],
                 [1.30, 0.00, 0.00],
-                [1.30, 0.00, 1.18],
+                [1.85, 0.00, 1.07],
             ],
             properties={"adsorbate": "*ONNO"}
         )
@@ -2481,7 +2504,7 @@ def generate_adsorbed_structures(reaction: str, pathway_name: str = "") -> dict:
     # and those dropped because an adsorbate could not be placed without overlap
     n_sites = 0
     n_placement_failed = 0
-    multipliers = [(1,1,1), (1,2,1)] #get_multipliers(slab_pmg) #TODO only for test
+    multipliers = get_multipliers(slab_pmg)
     for idx, repeat in enumerate(multipliers):
         clean_slab_pmg = asf.slab.copy()
         clean_slab_pmg.make_supercell(repeat)
@@ -2523,10 +2546,15 @@ def generate_adsorbed_structures(reaction: str, pathway_name: str = "") -> dict:
         ads.properties['adsorbate']: _adsorbate_reference_graph(ads)
         for ads in adsorbates
     }
+    bad_references = sorted(name for name, g in expected_graphs.items() if not reference_graph_ok(g))
+    for name in bad_references:
+        print(f"Warning: reference geometry of {name} is not one connected molecule at "
+              f"graph_tol={_ADSORBATE_BOND_TOL}; its identity check is skipped")
 
     return {"sets": adsorption_sets, "gas_refs": gas_refs,
             "expected_graphs": expected_graphs,
-            "placement": {"n_sites": n_sites, "n_placement_failed": n_placement_failed}}
+            "placement": {"n_sites": n_sites, "n_placement_failed": n_placement_failed,
+                          "identity_check_skipped": bad_references}}
 
 
 def run_relaxation(ml_model: str, calc, fmax: float, max_steps: int,

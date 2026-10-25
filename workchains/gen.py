@@ -1,8 +1,8 @@
-from aiida.orm import Int, Str, List, Dict
+from aiida.orm import Int, Str, List, Dict, CalcJobNode
 from aiida.plugins import WorkflowFactory
 from aiida.engine import WorkChain
-from uvsib.db.utils import update_row, add_structures, query_by_columns
-from uvsib.db.tables import DBChemsys
+from uvsib.db.utils import (add_structures, set_chemsys_status,
+                            GEN_READY, GEN_EMPTY, GEN_FAILED, GEN_TERMINAL)
 #from uvsib.codes.utils import get_mp_element_structures
 from uvsib.workchains.utils import (unique_low_energy_chemsys,
                                     get_output_as_entry,
@@ -12,6 +12,8 @@ from uvsib.workchains.utils import (unique_low_energy_chemsys,
 from uvsib.workflows import settings
 
 EHULL_ML = settings.EHULL_ML
+# MatterGen/GNoME parser exit code for an empty output.json (no structures)
+_EMPTY_OUTPUT_EXIT = 303
 
 class GeneratorWorkChain(WorkChain):
     """Work chain for generating structures"""
@@ -31,17 +33,15 @@ class GeneratorWorkChain(WorkChain):
             cls.final_report
         )
 
-        spec.exit_code(300, "ERROR_GENERATIVE_FAILED", message="Generative calculation failed (no generator produced structures)")
-        spec.exit_code(301, "ERROR_ML_RELAX_FAILED", message="ML relaxation failed")
-        spec.exit_code(302, "ERROR_NO_STRUCTURE_FOUND", message="No low energy chemical system was found")
-        spec.exit_code(303, "ERROR_NO_CHEMSYS_FOUND", message="Chemical system does not exist in DBChemsys")
+        spec.exit_code(300, "ERROR_GENERATIVE_FAILED", message="Generation failed for every chemical system")
+        spec.exit_code(304, "ERROR_NO_GENERATOR_ENABLED", message="No generator enabled in input.yaml")
 
     def setup(self):
         """Setup and report"""
         self.ctx.chemical_formula = self.inputs.chemical_formula.value
         self.ctx.chemical_systems = self.inputs.chemical_systems.get_list()
         self.ctx.ml_bulk_model = self.inputs.ml_bulk_model.value
-        self.ctx.failed_ml_e = []
+        self.ctx.status = {}
         self.report(f"Launching MatterGenWorkChain for {self.ctx.chemical_systems}")
         self.ctx.ref_entries, _ = get_ref_entries(self.ctx.chemical_formula, self.ctx.ml_bulk_model)
 
@@ -55,7 +55,7 @@ class GeneratorWorkChain(WorkChain):
         """
         if not (settings.MATTERGEN_GEN_ENABLED or settings.GNOME_PARALLEL):
             self.report("No generator enabled: set mattergen.gen_enabled and/or gnome.enabled in input.yaml")
-            return self.exit_codes.ERROR_GENERATIVE_FAILED
+            return self.exit_codes.ERROR_NO_GENERATOR_ENABLED
 
         for chemical_system in self.ctx.chemical_systems:
             if settings.MATTERGEN_GEN_ENABLED:
@@ -71,38 +71,38 @@ class GeneratorWorkChain(WorkChain):
     def inspect_gen_calcs(self):
         """Best-effort check of each generator branch. Both MatterGen and GNoME
         are optional (toggled in input.yaml); a failed branch only warns here --
-        predict_ml_energies fails a system only if no generator yielded any
-        structures."""
+        predict_ml_energies classifies each system from what its branches yielded."""
         for chemical_system in self.ctx.chemical_systems:
-            mkey = f"{chemical_system}_mattergen"
-            if mkey in self.ctx and not self.ctx[mkey].is_finished_ok:
-                self.report(f"Warning: MatterGen branch for {chemical_system} failed")
-
-            gkey = f"{chemical_system}_gnome"
-            if gkey in self.ctx and not self.ctx[gkey].is_finished_ok:
-                self.report(f"Warning: GNoME branch for {chemical_system} failed")
+            for key, name in self._branch_keys(chemical_system):
+                if not self.ctx[key].is_finished_ok:
+                    self.report(f"Warning: {name} branch for {chemical_system} failed")
 
     def predict_ml_energies(self):
+        """Submit one ML relaxation per system that produced structures.
+
+        A system with no structures is not an error for the run: it is marked
+        Empty if every generator branch ran and produced nothing (parser exit
+        ERROR_OUTPUT_INCOMPLETE), and Failed if any branch crashed."""
         for chemical_system in self.ctx.chemical_systems:
             output_structures = []
+            crashed = False
 
-            mkey = f"{chemical_system}_mattergen"
-            if mkey in self.ctx and self.ctx[mkey].is_finished_ok:
-                try:
-                    output_structures.extend(self.ctx[mkey].outputs.output_dict["structures"])
-                except Exception:
-                    self.report(f"Warning: could not read MatterGen structures for {chemical_system}")
-
-            gkey = f"{chemical_system}_gnome"
-            if gkey in self.ctx and self.ctx[gkey].is_finished_ok:
-                try:
-                    output_structures.extend(self.ctx[gkey].outputs.output_dict["structures"])
-                except Exception:
-                    self.report(f"Warning: could not read GNoME structures for {chemical_system}")
+            for key, name in self._branch_keys(chemical_system):
+                node = self.ctx[key]
+                if node.is_finished_ok:
+                    try:
+                        output_structures.extend(node.outputs.output_dict["structures"])
+                    except Exception:
+                        self.report(f"Warning: could not read {name} structures for {chemical_system}")
+                        crashed = True
+                elif not self._branch_found_nothing(node):
+                    crashed = True
 
             if not output_structures:
-                self.report(f"No generated structures for {chemical_system}")
-                return self.exit_codes.ERROR_GENERATIVE_FAILED
+                status = GEN_FAILED if crashed else GEN_EMPTY
+                self._mark(chemical_system, status)
+                self.report(f"No generated structures for {chemical_system}: marked {status}")
+                continue
 
             builder = self._construct_ML_relax_builder(output_structures)
             builder.local_label = Str("relax: {}".format(chemical_system))
@@ -111,22 +111,22 @@ class GeneratorWorkChain(WorkChain):
 
     def store_ml_energies(self):
         ml_bulk_model = self.ctx.ml_bulk_model
-        chemical_systems = self.ctx.chemical_systems
 
-        failed_ml_e = []
-        for chemical_system in chemical_systems:
-            wch = self.ctx[f"{chemical_system}_ml_e"]
+        for chemical_system in self.ctx.chemical_systems:
+            key = f"{chemical_system}_ml_e"
+            if key not in self.ctx:
+                continue  # already marked Empty/Failed in predict_ml_energies
+            wch = self.ctx[key]
 
             if not wch.is_finished_ok:
-                self.report(f"Warning: {self.ctx.ml_bulk_model} for {chemical_system} failed")
-                failed_ml_e.append(chemical_system)
+                self.report(f"Warning: {ml_bulk_model} for {chemical_system} failed")
+                self._mark(chemical_system, GEN_FAILED)
                 continue
             try:
                 new_entries = get_output_as_entry(wch)
-
-            except:
+            except Exception:
                 self.report(f"Warning: Failed to store results for {chemical_system}")
-                failed_ml_e.append(chemical_system)
+                self._mark(chemical_system, GEN_FAILED)
                 continue
 
             low_energy_entries = unique_low_energy_chemsys(chemical_system, new_entries,
@@ -135,25 +135,40 @@ class GeneratorWorkChain(WorkChain):
                                                            element_entries=self.ctx.ref_entries)
 
             if not low_energy_entries:
-                self.report(f"ERROR: No low-energy generated structures for {chemical_system}")
-                failed_ml_e.append(chemical_system)
+                self.report(f"No low-energy generated structures for {chemical_system}: marked {GEN_EMPTY}")
+                self._mark(chemical_system, GEN_EMPTY)
                 continue
 
             structure_energy_pairs = []
             for entry in low_energy_entries:
                 structure_energy_pairs.append((entry.structure.as_dict(), entry.energy))
             add_structures("generated", ml_bulk_model, structure_energy_pairs)
-            # DBChemsys status is updated to Ready
-            rows = query_by_columns(DBChemsys,{"chemsys": chemical_system})
-            if not rows:
-                self.report(f"ERROR: {chemical_system} was not found in DBChemsys")
-                return self.exit_codes.ERROR_NO_CHEMSYS_FOUND
+            self._mark(chemical_system, GEN_READY)
 
-            row = rows[0]
-            update_row(DBChemsys, row.uuid,{"gen_structures": "Ready"})
+        status = self.ctx.get("status", {})
+        counts = {s: list(status.values()).count(s) for s in GEN_TERMINAL}
+        self.report(f"Generation status: {counts}")
+        if status and counts[GEN_FAILED] == len(status):
+            return self.exit_codes.ERROR_GENERATIVE_FAILED
 
-        if failed_ml_e:
-            return self.exit_codes.ERROR_NO_STRUCTURE_FOUND
+    def _mark(self, chemical_system, status):
+        """Record ``status`` for this run and in DBChemsys."""
+        self.ctx.setdefault("status", {})[chemical_system] = status
+        if not set_chemsys_status(chemical_system, status):
+            self.report(f"Warning: {chemical_system} was not found in DBChemsys")
+
+    def _branch_keys(self, chemical_system):
+        """(ctx key, name) of every generator branch submitted for the system."""
+        keys = [(f"{chemical_system}_mattergen", "MatterGen"), (f"{chemical_system}_gnome", "GNoME")]
+        return [(k, n) for k, n in keys if k in self.ctx]
+
+    @staticmethod
+    def _branch_found_nothing(node):
+        """True if a failed generator branch ran cleanly but produced no
+        structures: every calculation it launched finished with the parser's
+        ERROR_OUTPUT_INCOMPLETE (empty output.json), none crashed."""
+        calcs = [c for c in node.called if isinstance(c, CalcJobNode)]
+        return bool(calcs) and all(c.exit_status == _EMPTY_OUTPUT_EXIT for c in calcs)
 
     def final_report(self):
         self.report(f"GeneratorWorkChain for {self.ctx.chemical_systems} finished successfully")

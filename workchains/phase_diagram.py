@@ -11,10 +11,16 @@ from uvsib.db.utils import (
         delete_row,
         query_by_columns,
         get_chemical_systems,
+        get_chemsys_status,
+        set_chemsys_status,
         not_singlepoint,
-        query_structure)
+        query_structure,
+        GEN_READY,
+        GEN_FAILED,
+        GEN_TERMINAL)
 from uvsib.workchains.utils import (
         unique_low_energy_comp,
+        competing_chemical_systems,
         get_ref_entries,
         get_code,
         get_model_device)
@@ -58,9 +64,37 @@ def get_entries_from_db(chemical_formula, method):
                 composition=struct.composition,
                 structure=struct,
                 energy=row.energy,
-                data={"struct_uuid": row.structure_uuid})
+                data={"struct_uuid": row.structure_uuid, "source": row.source})
         )
     return entries
+
+def get_hull_coverage(chemical_formula, entries):
+    """Per multi-element subsystem of ``chemical_formula``: its generation
+    status (DBChemsys.gen_structures, "Missing" if no row) and how many hull
+    entries came from generation, the MPDB and elsewhere (CSP, ...).
+
+    Returns ``(coverage, gaps)``, ``gaps`` being the subsystems whose
+    generation is not Ready -- their competing phases rest on the MPDB (and
+    CSP) alone, so a missed stable phase would put the hull too high and
+    underestimate the target's E_above_hull.
+    """
+    coverage = {}
+    for chemsys in competing_chemical_systems(chemical_formula):
+        coverage[chemsys] = {"gen_status": get_chemsys_status(chemsys),
+                             "n_generated": 0, "n_mpdb": 0, "n_other": 0}
+    for entry in entries:
+        counts = coverage.get(entry.composition.chemical_system)
+        if counts is None:
+            continue
+        source = entry.data.get("source") or ""
+        if source == "generated":
+            counts["n_generated"] += 1
+        elif source.startswith("MPDB"):
+            counts["n_mpdb"] += 1
+        else:
+            counts["n_other"] += 1
+    gaps = sorted(cs for cs, c in coverage.items() if c["gen_status"] != GEN_READY)
+    return coverage, gaps
 
 class PhaseDiagramMLWorkChain(WorkChain):
     """Work chain for ML Phase Diagram calculations"""
@@ -130,6 +164,10 @@ class PhaseDiagramMLWorkChain(WorkChain):
 
     def should_run_mpdb_ml(self):
         """Check whether should run MPDBMLWorkChain"""
+        if settings.MPDB_CHEMSYS_ENABLED:
+            # competing phases of every subsystem may still be missing; the
+            # workchain only fetches/relaxes what is not in the database yet
+            return True
         if self._has_mpdb_ml_structures():
             self.report(
                 f"Skipping MPDBMLWorkChain for {self.ctx.chemical_formula}: "
@@ -216,20 +254,30 @@ class PhaseDiagramMLWorkChain(WorkChain):
         self.to_context(**{"gen": future})
 
     def inspect_gen_calcs(self):
-        """Inspect MatterGenWorkChain"""
-        failed_chemsys = []
-        if not self.ctx.gen.is_finished_ok:
-            # remove corresponding row from DBChemsys
-            for chemsys in self.ctx.chemical_systems:
-                results = query_by_columns(DBChemsys, {'chemsys': chemsys})
-                if results:
-                    row = results[0]
-                    if not row.gen_structures:
-                        failed_chemsys.append(chemsys)
-            cleanup_failed_systems(failed_chemsys)
+        """Inspect GeneratorWorkChain.
 
-            self.report(f"MatterGen (gen) for {failed_chemsys} failed. Corresponding rows will be removed from DBChemsys.")
+        Per-system generation failures do not fail the phase diagram: the
+        system is left Failed (retried on a later request) and recorded as a
+        hull gap. Only a missing generator configuration is fatal."""
+        gen = self.ctx.gen
+        if gen.is_finished_ok:
+            return
+
+        no_generator = WorkflowFactory("gen").exit_codes.ERROR_NO_GENERATOR_ENABLED.status
+        unfinished = [cs for cs in self.ctx.chemical_systems
+                      if get_chemsys_status(cs) not in GEN_TERMINAL]
+        if gen.exit_status == no_generator:
+            cleanup_failed_systems(unfinished)
+            self.report(f"MatterGen (gen) for {unfinished} failed: no generator enabled. "
+                        "Corresponding rows will be removed from DBChemsys.")
             return self.exit_codes.ERROR_CALCULATION_FAILED
+
+        # e.g. an excepted/killed GeneratorWorkChain that never marked a system
+        for chemsys in unfinished:
+            set_chemsys_status(chemsys, GEN_FAILED)
+        self.report(f"WARNING: GeneratorWorkChain did not finish OK (exit {gen.exit_status}); "
+                    "continuing with the structures available. Failed systems are "
+                    "recorded as hull gaps and regenerated on a later request.")
 
     def wait_for_data(self):
         """Wait until all chemical systems are available"""
@@ -268,6 +316,12 @@ class PhaseDiagramMLWorkChain(WorkChain):
             return self.exit_codes.ERROR_CALCULATION_FAILED
 
         ref_entries, _ = get_ref_entries(chemical_formula, self.ctx.ml_bulk_model)
+
+        hull_coverage, hull_gaps = get_hull_coverage(chemical_formula, entries)
+        for chemsys in hull_gaps:
+            cov = hull_coverage[chemsys]
+            self.report(f"WARNING: hull gap in {chemsys}: generation {cov['gen_status']}, "
+                        f"{cov['n_mpdb']} MPDB and {cov['n_other']} other competing structures.")
 
         uuid_list = []
         ml_selection = []
@@ -309,6 +363,8 @@ class PhaseDiagramMLWorkChain(WorkChain):
             "ml_selection": ml_selection,
             "ml_ehull_threshold": float(EHULL_ML),
             "ml_bulk_model": self.ctx.ml_bulk_model,
+            "hull_coverage": hull_coverage,
+            "hull_gaps": hull_gaps,
         })
         update_row(DBComposition, row.uuid, {"stable_struct": stable_struct})
         self.report(f"{len(unique_entries)} stable structures for {chemical_formula} were stored.")

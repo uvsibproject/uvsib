@@ -164,3 +164,36 @@ def get_structures_from_mpdb_by_composition(chemical_formula, e_hull=0.1):
             exp_structures.append((struct_dict, mp_id))
 
     return stable_structures, exp_structures
+
+def get_structures_from_mpdb_by_chemsys(chemical_systems, e_hull=0.1):
+    """Get structures of every composition in the given chemical systems from
+    the MPDB (one query for all systems; ``chemsys`` matches each system
+    exactly, so pass every subsystem wanted, e.g. ["Ba-O", "O-Ti", "Ba-O-Ti"]).
+
+    Returns ``stable_structures, exp_structures`` in the same
+    ``(structure_dict, mp_id)`` format as
+    ``get_structures_from_mpdb_by_composition``.
+    """
+    if not chemical_systems:
+        return [], []
+
+    with MPRester(settings.api_key, use_document_model=False) as mpr:
+        summaries = mpr.materials.summary.search(
+            chemsys=list(chemical_systems),
+            energy_above_hull=(0, e_hull),
+            fields=["material_id", "structure", "energy_above_hull", "theoretical"],
+        )
+
+    stable_structures = []
+    exp_structures = []
+    for summary in summaries or []:
+        raw_id = summary.get("material_id")
+        mp_id = str(raw_id) if raw_id is not None else None
+        structure = summary["structure"]
+        struct_dict = structure.as_dict() if hasattr(structure, "as_dict") else structure
+        if summary.get("theoretical"):
+            stable_structures.append((struct_dict, mp_id))
+        else:
+            exp_structures.append((struct_dict, mp_id))
+
+    return stable_structures, exp_structures

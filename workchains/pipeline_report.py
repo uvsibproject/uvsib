@@ -165,6 +165,50 @@ def bulk_candidates(chemical_formula):
     return candidates
 
 
+def hull_gaps(chemical_formula):
+    """Subsystems of ``chemical_formula`` whose structure generation is not
+    Ready (Empty / Failed / Missing), as stored by PhaseDiagramMLWorkChain in
+    ``DBComposition.stable_struct``: ``{chemsys: coverage}`` with the
+    generation status and the number of MPDB / other competing structures
+    the hull used there. Empty for runs predating the record."""
+    rows = query_by_columns(DBComposition, {"composition": chemical_formula})
+    if not rows:
+        return {}
+    stable_struct = rows[0].stable_struct or {}
+    coverage = stable_struct.get("hull_coverage") or {}
+    return {cs: coverage.get(cs, {}) for cs in stable_struct.get("hull_gaps") or []}
+
+
+_GAP_STATUS_TEXT = {
+    "Empty": "the generators produced no structures",
+    "Failed": "structure generation failed",
+    "Missing": "no structure generation record",
+}
+
+
+def hull_gap_lines(gaps):
+    """One sentence per hull gap, most serious first: no MPDB or other
+    competing structure at all, then failed/missing generation."""
+    def severity(item):
+        cs, cov = item
+        covered = (cov.get("n_mpdb") or 0) + (cov.get("n_other") or 0)
+        return (covered > 0, cov.get("gen_status") == "Empty", cs)
+
+    lines = []
+    for cs, cov in sorted(gaps.items(), key=severity):
+        status = cov.get("gen_status")
+        text = _GAP_STATUS_TEXT.get(status, f"generation status {status}")
+        n_mpdb, n_other = cov.get("n_mpdb") or 0, cov.get("n_other") or 0
+        if n_mpdb or n_other:
+            parts = [_n(n_mpdb, "Materials Project structure")] if n_mpdb else []
+            parts += [_n(n_other, "other structure")] if n_other else []
+            covered = "competing phases from " + " and ".join(parts)
+        else:
+            covered = "no competing phase in the hull"
+        lines.append(f"{cs}: {text}; {covered}.")
+    return lines
+
+
 def _slab_area(slab):
     """Surface area (Å²) of a pymatgen ``Slab.as_dict()`` blob, from the
     in-plane lattice vectors a, b (|a x b|). Returns ``None`` if the slab has
@@ -444,6 +488,9 @@ def adsorbate_diagnostic_parts(diag):
                           ("n_not_converged", "not converged")):
             if summary.get(key):
                 parts.append(f"{summary[key]} {text}")
+    if summary.get("identity_check_skipped"):
+        parts.append("identity check skipped for " + ", ".join(summary["identity_check_skipped"])
+                     + " (bad reference geometry)")
     rejected = diag.get("rejected") or []
     n_rejected = sum(r["count"] for r in rejected)
     if n_rejected:
@@ -2496,6 +2543,18 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
             </div>"""
     else:
         no_candidate_note = ""
+    gaps = hull_gaps(chemical_formula)
+    if gaps:
+        gap_items = "".join(f"<li>{_html.escape(line)}</li>" for line in hull_gap_lines(gaps))
+        hull_gap_note = f"""
+            <div class="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+              <p class="font-bold mb-2">The phase diagram has incomplete competing phases.</p>
+              <ul class="list-disc pl-5 space-y-1">{gap_items}</ul>
+              <p class="mt-2 text-amber-800">A stable competing phase missing from these subsystems would
+                place the hull too high, so the E<sub>hull</sub> values below may be underestimated.</p>
+            </div>"""
+    else:
+        hull_gap_note = ""
     model =next((s["bulk"]["ml_bulk_model"] for s in summaries if s["bulk"]), None)
     bulk_task = _ml_stage_head("bulk_relax")
     surface_model = _ml_surface_model()
@@ -3092,7 +3151,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 <p class="text-xs font-bold text-slate-500 mb-1">Reaction candidates</p>
                 <p class="text-lg font-bold text-slate-900">{n_candidates}</p>
               </div>{robust_tile}{robust_candidates_tile}
-            </div>{no_candidate_note}
+            </div>{no_candidate_note}{hull_gap_note}
             <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-sm text-slate-600 mt-5 pt-5 border-t border-slate-100">{summary_note}
             </dl>
           </div>
@@ -3146,14 +3205,14 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
 
       <div class="flex flex-col gap-8">
         <div class="rounded-xl border bg-white shadow-sm p-6">
-          <h3 class="text-lg font-bold text-slate-900 mb-6">Pipeline Metadata</h3>
+          <h3 class="text-lg font-bold text-slate-900 mb-6">Metadata</h3>
           <div class="space-y-5">
             <div class="flex items-center gap-4">
               <div class="size-10 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center shrink-0">
                 <i data-lucide="beaker" class="w-6 h-6"></i>
               </div>
               <div>
-                <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">Composition</p>
+                <p class="text-xs font-bold text-slate-400 capitalize tracking-wider">Composition</p>
                 <p class="text-sm font-bold text-slate-900">{esc(chemical_formula)}</p>
               </div>
             </div>
@@ -3162,7 +3221,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 <i data-lucide="flask-conical" class="w-6 h-6"></i>
               </div>
               <div>
-                <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">Reaction</p>
+                <p class="text-xs font-bold text-slate-400 capitalize tracking-wider">Reaction</p>
                 <p class="text-sm font-bold text-slate-900">{esc(reaction)}</p>
               </div>
             </div>
@@ -3171,7 +3230,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 <i data-lucide="git-branch" class="w-6 h-6"></i>
               </div>
               <div>
-                <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">Reaction Path</p>
+                <p class="text-xs font-bold text-slate-400 capitalize tracking-wider">Reaction Path</p>
                 <p class="text-sm font-bold text-slate-900">{esc(reaction_path)}</p>
               </div>
             </div>
@@ -3180,7 +3239,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 <i data-lucide="cpu" class="w-6 h-6"></i>
               </div>
               <div>
-                <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">ML Bulk Model</p>
+                <p class="text-xs font-bold text-slate-400 capitalize tracking-wider">ML Bulk Model</p>
                 <p class="text-sm font-bold text-slate-900">{esc(_model_label(model, bulk_task))}</p>
               </div>
             </div>
@@ -3189,7 +3248,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 <i data-lucide="layers-3" class="w-6 h-6"></i>
               </div>
               <div>
-                <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">ML Surface Model</p>
+                <p class="text-xs font-bold text-slate-400 capitalize tracking-wider">ML Surface Model</p>
                 <p class="text-sm font-bold text-slate-900">{esc(_model_label(surface_model, surface_task))}</p>
               </div>
             </div>
@@ -3198,7 +3257,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 <i data-lucide="sun" class="w-6 h-6"></i>
               </div>
               <div>
-                <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">Light Screen</p>
+                <p class="text-xs font-bold text-slate-400 capitalize tracking-wider">Light Harvesting</p>
                 <p class="text-sm font-bold text-slate-900">{light_screen_cell}</p>
               </div>
             </div>
@@ -3207,7 +3266,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 <i data-lucide="test-tube" class="w-6 h-6"></i>
               </div>
               <div>
-                <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">Synthesizability</p>
+                <p class="text-xs font-bold text-slate-400 capitalize tracking-wider">Synthesizability</p>
                 <p class="text-sm font-bold text-slate-900">{esc(synth_models) if synth_models else "not run"}</p>
               </div>
             </div>
@@ -3216,7 +3275,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 <i data-lucide="activity" class="w-6 h-6"></i>
               </div>
               <div>
-                <p class="text-xs font-bold text-slate-400 uppercase tracking-wider">Phonons</p>
+                <p class="text-xs font-bold text-slate-400 capitalize tracking-wider">Phonons</p>
                 <p class="text-sm font-bold text-slate-900">{esc(phonon_models) if phonon_models else "not run"}</p>
               </div>
             </div>
@@ -3226,8 +3285,8 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
         <div class="rounded-xl bg-primary text-white p-6">
           <h3 class="text-lg font-bold mb-2">Need the raw data?</h3>
           <p class="text-white/80 text-sm mb-6">
-            Download every number and structure behind this page -- bulk and
-            surface structures, ehull, surface energies, eta, and dG -- as
+            Download all numbers and structures behind this page &mdash; bulk and
+            surface structures, E<sub>hull</sub>, surface energies, and &eta; &mdash; as
             one JSON file.
           </p>
           <a
@@ -3235,7 +3294,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
             download
             class="block w-full text-center bg-white text-primary rounded-md py-2 font-bold"
           >
-            Download Raw Data (JSON)
+            Download
           </a>
         </div>
 

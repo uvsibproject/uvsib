@@ -5,7 +5,7 @@ from aiida.orm import QueryBuilder, WorkChainNode
 from uvsib.db.tables import DBFrontend, DBChemsys, DBComposition
 from uvsib.db.session import get_session
 from uvsib.db.utils import (update_row, add_row, get_chemical_systems, query_by_columns,
-                            update_step_status_path)
+                            update_step_status_path, GEN_DONE)
 from uvsib.workchains.submit import submit_mainworkchain
 from uvsib.workchains.phase_diagram import cleanup_failed_systems
 from uvsib.workflows import settings
@@ -172,7 +172,8 @@ def add_from_frontend(dict_from_frontend_list):
     update_dbfrontend()
 
 def reset_orphaned_chemsys():
-    """Delete DBChemsys rows stuck not-"Ready" from a crashed/killed workflow.
+    """Delete DBChemsys rows that are neither "Ready" nor "Empty" (unfinished
+    from a crashed/killed workflow, or "Failed") so they get regenerated.
 
     A MainWorkChain/PhaseDiagramMLWorkChain that dies (OOM, daemon restart,
     manual kill) never reaches its inspect_* step, so gen_structures stays
@@ -180,11 +181,12 @@ def reset_orphaned_chemsys():
     for every future submission needing that chemsys, for the full 10 h
     timeout. Only chemsys not claimed by a still-active workflow are removed,
     so a run that is genuinely in progress is left untouched; the row gets
-    re-created and regenerated the next time it's requested.
+    re-created and regenerated the next time it's requested. "Empty" rows
+    (generators ran and found nothing) are a final result and are kept.
     """
     with get_session() as session:
         stuck_rows = session.query(DBChemsys).filter(
-            or_(DBChemsys.gen_structures.is_(None), DBChemsys.gen_structures != "Ready")
+            or_(DBChemsys.gen_structures.is_(None), DBChemsys.gen_structures.notin_(GEN_DONE))
         ).all()
         stuck_chemsys = [row.chemsys for row in stuck_rows]
 
