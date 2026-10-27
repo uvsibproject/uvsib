@@ -11,7 +11,10 @@ composition's selected ML bulk structures it:
 2. adds the photocatalytic *straddle* verdict for every implemented
    (reaction, pathway) -- does the gap bracket that reaction's redox couple
    with margin? -- using ``redox_couples`` (single source of truth: the CHE
-   calculators' own ``equilibrium_potential`` values);
+   calculators' own ``equilibrium_potential`` values). It is computed for the
+   mean gap (``straddle``) and for each gap model's own gap
+   (``band_edges_by_model_vs_rhe_V`` / ``straddle_by_model``), since the
+   models target different levels of theory and can disagree on the verdict;
 3. writes the combined payload to ``DBStructureVersion.band_info`` for the
    version PhaseDiagramMLWorkChain ranked (method == ``ml_bulk_model``).
 
@@ -36,7 +39,7 @@ from aiida.plugins import WorkflowFactory
 from uvsib.db.tables import DBComposition
 from uvsib.db.utils import query_by_columns, query_structure, update_structure_band_info
 from uvsib.workchains.utils import get_code
-from uvsib.workchains.redox_couples import all_couples, straddle_verdict
+from uvsib.workchains.redox_couples import all_couples, model_band_edges, straddle_verdict
 from uvsib.workflows import settings
 
 
@@ -151,6 +154,9 @@ class OpticalScreenWorkChain(WorkChain):
             if edges:
                 band_info["straddle"] = _straddle_block(edges, margin)
                 band_info["straddle_margin_V"] = margin
+                by_model = model_band_edges(edges, band_info.get("gap_values_eV"))
+                band_info["band_edges_by_model_vs_rhe_V"] = by_model
+                band_info["straddle_by_model"] = {key: _straddle_block(e, margin) for key, e in by_model.items()}
             if update_structure_band_info(result["uuid"], self.ctx.model, band_info):
                 self.ctx.stored += 1
             else:

@@ -380,16 +380,22 @@ def _clamp_negative_gap(band_info):
     Butler--Ginley edges are cb = chi - E_e - gap/2 and vb = cb + gap, so with
     gap = 0 both collapse onto their midpoint; the stored straddle margins are
     recomputed from those edges. The model's own value is kept as
-    ``gap_raw_eV``. Returns ``band_info`` unchanged when the gap is >= 0."""
+    ``gap_raw_eV``. A negative per-model gap (``gap_values_eV``) is clamped to
+    0 too, even when the mean is positive. Returns ``band_info`` unchanged when
+    no gap is negative."""
     gap = (band_info or {}).get("gap_eV")
-    if gap is None or gap >= 0:
+    per_model = (band_info or {}).get("gap_values_eV") or {}
+    if (gap is None or gap >= 0) and all(v >= 0 for v in per_model.values()):
         return band_info
     from uvsib.workchains.redox_couples import straddle_verdict
 
     info = dict(band_info)
+    info["gap_values_eV"] = {k: max(v, 0.0) for k, v in per_model.items()}
+    if gap is None or gap >= 0:
+        info["notes"] = list(info.get("notes") or []) + ["negative per-model ML gap clamped to 0"]
+        return info
     info["gap_raw_eV"] = gap
     info["gap_eV"] = 0.0
-    info["gap_values_eV"] = {k: max(v, 0.0) for k, v in (info.get("gap_values_eV") or {}).items()}
     info["notes"] = list(info.get("notes") or []) + [
         f"negative ML gap ({gap:.4f} eV) clamped to 0; band edges set to mid-gap"]
     for key in ("band_edges_vs_rhe_V", "band_edges_vs_vacuum_eV"):
@@ -962,12 +968,41 @@ def bulk_straddle(electronic, reaction, reaction_path):
     return by_path.get("default")
 
 
+def bulk_straddle_by_model(electronic, reaction, reaction_path):
+    """``{model_key: straddle_verdict}`` for this (reaction, reaction_path), with
+    each gap model's own gap in place of the mean. Derived from the mean-gap
+    verdict's couple/margin and ``gap_values_eV`` rather than read from the
+    stored ``straddle_by_model``, so bulks screened before that field existed
+    get it too. Empty when there is no mean-gap verdict."""
+    verdict = bulk_straddle(electronic, reaction, reaction_path)
+    edges = (electronic or {}).get("band_edges_vs_rhe_V")
+    if not verdict or not edges:
+        return {}
+    from uvsib.workchains.redox_couples import model_band_edges, straddle_verdict
+
+    return {key: straddle_verdict(e["cb"], e["vb"], verdict["u_red"], verdict["u_ox"],
+                                  verdict["margin_required_V"])
+            for key, e in model_band_edges(edges, electronic.get("gap_values_eV")).items()}
+
+
+def straddle_consensus(by_model):
+    """``("straddles" | "model-dependent" | "no", [passing model keys])`` over the
+    per-model verdicts of ``bulk_straddle_by_model``; ``(None, [])`` when empty."""
+    if not by_model:
+        return None, []
+    passing = [key for key, v in by_model.items() if v.get("straddles")]
+    if len(passing) == len(by_model):
+        return "straddles", passing
+    return ("model-dependent" if passing else "no"), passing
+
+
 def plot_band_alignment(summaries, reaction, reaction_path, ax=None):
     """One vertical CB->VB bar per bulk on an inverted potential axis (V vs RHE,
     increasing downward, as in the usual band diagram), with the reaction's
-    reduction/oxidation levels drawn as dashed lines. Bars that straddle the
-    couple with margin are green, the rest grey. Returns ``None`` if no bulk has
-    band edges (optical screen not run)."""
+    reduction/oxidation levels drawn as dashed lines. Bars span the mean-gap
+    edges; they are green when every gap model's gap straddles the couple with
+    margin, orange when only some do, grey otherwise. Returns ``None`` if no
+    bulk has band edges (optical screen not run)."""
     plt = _require_matplotlib()
 
     edged = [s for s in summaries
@@ -985,8 +1020,8 @@ def plot_band_alignment(summaries, reaction, reaction_path, ax=None):
         e = s["electronic"]
         cb = e["band_edges_vs_rhe_V"]["cb"]
         vb = e["band_edges_vs_rhe_V"]["vb"]
-        verdict = bulk_straddle(e, reaction, reaction_path)
-        colour = "seagreen" if (verdict and verdict.get("straddles")) else "silver"
+        consensus, _ = straddle_consensus(bulk_straddle_by_model(e, reaction, reaction_path))
+        colour = {"straddles": "seagreen", "model-dependent": "orange"}.get(consensus, "silver")
         ax.bar(i, vb - cb, bottom=cb, width=0.55, color=colour, edgecolor="black", linewidth=0.6)
         gap = e.get("gap_eV")
         ax.text(i, cb, f" {gap:.2f} eV" if gap is not None else "", ha="center", va="bottom", fontsize=8)
@@ -2564,6 +2599,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
     electronic_present = any(s.get("electronic") for s in summaries)
     couple = _reaction_couple(reaction, reaction_path)
     n_light = 0
+    light_partial = []  # (uuid, [passing model keys]) for model-dependent verdicts
     screen_models = screen_fidelity = None
     screen_targets = []
     for s in summaries:
@@ -2574,9 +2610,19 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
             screen_models = ", ".join(e.get("gap_models") or []) or None
             screen_fidelity = e.get("megnet_fidelity_label")
             screen_targets = _gap_model_targets(e)
-        verdict = bulk_straddle(e, reaction, reaction_path)
-        if verdict and verdict.get("straddles"):
+        consensus, passing = straddle_consensus(bulk_straddle_by_model(e, reaction, reaction_path))
+        if consensus == "straddles":
             n_light += 1
+        elif consensus == "model-dependent":
+            light_partial.append((s["structure_uuid"], passing))
+
+    # short display name per gap model ("MEGNet", "ALIGNN"); with the target
+    # level added when two models would otherwise share a name
+    model_keys = [k for k, _, _, _ in screen_targets]
+    model_names = {k: (m or k).split()[0] for k, m, _, _ in screen_targets}
+    if len(set(model_names.values())) < len(model_names):
+        model_names = {k: f"{(m or k).split()[0]} ({t})" if t else k for k, m, _, t in screen_targets}
+    multi_model = len(model_keys) > 1
 
     def esc(x):
         return _html.escape(str(x)) if x is not None else "&mdash;"
@@ -2594,15 +2640,35 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 f'target="_blank" rel="noopener" class="text-primary hover:underline '
                 f'font-mono text-xs">{esc(mp_id)}</a>')
 
-    def straddle_badge(verdict):
-        if not verdict:
+    def straddle_badge(by_model):
+        """Three-way verdict over the gap models; the hover lists each model's margins."""
+        consensus, passing = straddle_consensus(by_model)
+        if consensus is None:
             return "&mdash;"
-        if verdict.get("straddles"):
-            return ('<span class="px-2 py-0.5 rounded bg-green-100 text-green-700 '
-                    'text-xs font-bold">straddles</span>')
-        return ('<span class="px-2 py-0.5 rounded bg-red-100 text-red-700 text-xs '
-                f'font-bold" title="reduction margin {verdict.get("margin_reduction_V")} V, '
-                f'oxidation margin {verdict.get("margin_oxidation_V")} V">no</span>')
+        order = sorted(by_model, key=lambda k: model_keys.index(k) if k in model_keys else len(model_keys))
+        passing = [k for k in order if k in passing]
+        colour, label = {
+            "straddles": ("bg-green-100 text-green-700", "straddles"),
+            "model-dependent": ("bg-amber-100 text-amber-800",
+                                f'model-dependent ({", ".join(model_names.get(k, k) for k in passing)} only)'),
+            "no": ("bg-red-100 text-red-700", "no"),
+        }[consensus]
+        title = "; ".join(f'{model_names.get(k, k)}: reduction margin {by_model[k]["margin_reduction_V"]:+.4f} V, '
+                          f'oxidation margin {by_model[k]["margin_oxidation_V"]:+.4f} V' for k in order)
+        return (f'<span class="px-2 py-0.5 rounded {colour} text-xs font-bold" '
+                f'title="{esc(title)}">{esc(label)}</span>')
+
+    def per_model_cell(values, fmt, below=None):
+        """``a / b`` in gap-model order; values under ``below`` in red."""
+        parts = []
+        for k in model_keys:
+            v = values.get(k)
+            if v is None:
+                parts.append("&mdash;")
+                continue
+            txt = format(v, fmt).replace("-", "&minus;")
+            parts.append(f'<span class="text-red-700">{txt}</span>' if below is not None and v < below else txt)
+        return f'<span class="whitespace-nowrap">{" / ".join(parts)}</span>'
 
     # -- stable-bulks table ----------------------------------------------
     bulk_rows = []
@@ -2612,14 +2678,6 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
             ehull_cell, source_cell = _ehull_with_spread(b, esc), esc(_source_label(b["source"]))
         else:
             ehull_cell = source_cell = "&mdash;"
-        e = s.get("electronic") or {}
-        gap, gap_std = e.get("gap_eV"), e.get("gap_std_eV")
-        if gap is None:
-            gap_cell = "&mdash;"
-        elif gap_std:
-            gap_cell = f'{gap:.2f} &plusmn; {gap_std:.2f}'
-        else:
-            gap_cell = f'{gap:.2f}'
         bulk_rows.append(f"""
                   <tr class="border-t">
                     <td class="px-6 py-4 font-mono text-xs text-slate-900" title="{esc(uid)}">{esc(uid[:8])}</td>
@@ -2627,7 +2685,6 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                     <td class="px-6 py-4">{mp_id_cell(b)}</td>
                     <td class="px-6 py-4">{ehull_cell}</td>
                     <td class="px-6 py-4">{s["n_surfaces"]}</td>
-                    <td class="px-6 py-4">{gap_cell}</td>
                   </tr>""")
 
     # -- bulk-table notes: model names come from this run's data --------------
@@ -2675,13 +2732,6 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                     Different slabs may represent different orientations or surface configurations. A value
                     of zero means that no surface candidates were retained by the workflow; it does not
                     establish that the material has no stable physical surfaces.</dd>
-                </div>
-                <div>
-                  <dt class="font-semibold text-slate-900">Gap (eV)</dt>
-                  <dd>Predicted electronic band gap in eV. The &plusmn; value represents the spread between
-                    the band-gap models{f" ({esc(screen_models)})" if screen_models else ""}, not a calibrated
-                    confidence interval. The band-gap models and the target quantity used to train them are
-                    described in the <em>Light Harvesting</em> section.</dd>
                 </div>
               </dl>"""
 
@@ -2905,6 +2955,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
 
     # -- light-harvesting section (only when the optical screen ran) ---------
     if electronic_present:
+        n_light_cols = 7 + (len(model_keys) if multi_model else 0)
         light_rows = []
         for s in summaries:
             e = s.get("electronic")
@@ -2912,7 +2963,7 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
             if not e:
                 light_rows.append(
                     f'<tr class="border-t"><td class="px-4 py-3 font-mono text-xs">{esc(uid[:8])}</td>'
-                    '<td class="px-4 py-3 text-slate-400 italic" colspan="7">not screened</td></tr>')
+                    f'<td class="px-4 py-3 text-slate-400 italic" colspan="{n_light_cols - 1}">not screened</td></tr>')
                 continue
             gap, gap_std = e.get("gap_eV"), e.get("gap_std_eV")
             gap_cell = "&mdash;" if gap is None else (
@@ -2921,25 +2972,27 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
             if gap is not None and per_model:
                 gap_title = " · ".join(f"{k} {v:.2f}" for k, v in per_model.items()) + " eV"
                 gap_cell = f'<span title="{esc(gap_title)}">{gap_cell}</span>'
-            edges = e.get("band_edges_vs_rhe_V") or {}
-            cb_cell = f'{edges["cb"]:.2f}' if "cb" in edges else "&mdash;"
-            vb_cell = f'{edges["vb"]:.2f}' if "vb" in edges else "&mdash;"
-            verdict = bulk_straddle(e, reaction, reaction_path)
-            straddle_cell = straddle_badge(verdict)
-            if verdict:
-                min_gap_cell = f'{verdict["min_gap_eV"]:.2f}'
-                red_cell = f'{verdict["margin_reduction_V"]:+.2f}'
-                ox_cell = f'{verdict["margin_oxidation_V"]:+.2f}'
+            model_gap_cells = "".join(
+                f'\n                        <td class="px-4 py-3">'
+                f'{f"{per_model[k]:.2f}" if k in per_model else "&mdash;"}</td>'
+                for k in (model_keys if multi_model else []))
+            by_model = bulk_straddle_by_model(e, reaction, reaction_path)
+            straddle_cell = straddle_badge(by_model)
+            if by_model:
+                required = next(iter(by_model.values()))["margin_required_V"]
+                cb_cell = per_model_cell({k: v["u_red"] - v["margin_reduction_V"] for k, v in by_model.items()}, ".2f")
+                vb_cell = per_model_cell({k: v["u_ox"] + v["margin_oxidation_V"] for k, v in by_model.items()}, ".2f")
+                red_cell = per_model_cell({k: v["margin_reduction_V"] for k, v in by_model.items()}, "+.2f", required)
+                ox_cell = per_model_cell({k: v["margin_oxidation_V"] for k, v in by_model.items()}, "+.2f", required)
             else:
-                min_gap_cell = red_cell = ox_cell = "&mdash;"
+                cb_cell = vb_cell = red_cell = ox_cell = "&mdash;"
             light_rows.append(f"""
                       <tr class="border-t">
                         <td class="px-4 py-3 font-mono text-xs" title="{esc(uid)}">{esc(uid[:8])}</td>
-                        <td class="px-4 py-3">{gap_cell}</td>
+                        <td class="px-4 py-3">{gap_cell}</td>{model_gap_cells}
                         <td class="px-4 py-3">{straddle_cell}</td>
                         <td class="px-4 py-3">{cb_cell}</td>
                         <td class="px-4 py-3">{vb_cell}</td>
-                        <td class="px-4 py-3">{min_gap_cell}</td>
                         <td class="px-4 py-3">{red_cell}</td>
                         <td class="px-4 py-3">{ox_cell}</td>
                       </tr>""")
@@ -2951,9 +3004,61 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                            for v in [bulk_straddle(s.get("electronic"), reaction, reaction_path)]
                            if v and v.get("margin_required_V") is not None), None)
         margin_txt = f"{margin_req:g} V" if margin_req is not None else "the required margin"
+        names_txt = " / ".join(esc(model_names[k]) for k in model_keys)
         gap_mean_txt = (f"Plain mean of the ML-predicted band gaps ({gap_models_txt}), so it mixes their "
-                        "target quantities." if len(screen_targets) > 1 else
+                        "target quantities. Shown for reference only: the straddle verdict, band edges and "
+                        "margins are evaluated per model." if multi_model else
                         f"Mean of the ML-predicted band gaps ({gap_models_txt}).")
+
+        if multi_model:
+            partial_txt = "; ".join(
+                f'<strong>{esc(uid[:8])}</strong> with {esc(", ".join(model_names.get(k, k) for k in passing))} only'
+                for uid, passing in light_partial)
+            straddle_count_txt = (f"Here <strong>{n_light_cell}</strong> of {len(summaries)} bulk(s) straddle with "
+                                  f"every gap model, {len(light_partial)} with only some of them"
+                                  + (f": {partial_txt}" if partial_txt else "") + ".")
+        else:
+            straddle_count_txt = f"Here <strong>{n_light_cell}</strong> of {len(summaries)} bulk(s) straddle."
+
+        # chi is composition-only, so every bulk shares one mid-gap level and the
+        # straddle test reduces to a single gap threshold for this composition
+        mean_verdict = next((v for s in summaries
+                             for v in [bulk_straddle(s.get("electronic"), reaction, reaction_path)] if v), None)
+        mids = [0.5 * (ed["cb"] + ed["vb"]) for s in summaries
+                for ed in [(s.get("electronic") or {}).get("band_edges_vs_rhe_V")] if ed]
+        threshold_txt = ""
+        if mean_verdict and mids and max(mids) - min(mids) < 0.01:
+            mid, margin = mids[0], mean_verdict["margin_required_V"]
+            need_red = 2 * (mid - mean_verdict["u_red"] + margin)
+            need_ox = 2 * (mean_verdict["u_ox"] + margin - mid)
+            limiting = ("conduction-band edge (reduction side)" if need_red >= need_ox
+                        else "valence-band edge (oxidation side)")
+            threshold_txt = (f"&chi; depends on composition only, so every bulk here has the same mid-gap level "
+                             f"({mid:+.2f} V<sub>RHE</sub>) and straddling reduces to a gap threshold: "
+                             f"E<sub>g</sub> &ge; <strong>{max(need_red, need_ox):.2f} eV</strong>, set by the "
+                             f"{limiting}. ")
+        if multi_model:
+            targets = " vs ".join(esc(t) for _, _, _, t in screen_targets if t)
+            threshold_txt += ("A model-dependent verdict mostly reflects the different levels of theory the gap "
+                              f"models target{f' ({targets})' if targets else ''} and marks a candidate worth a "
+                              "DFT check, not a result.")
+        threshold_html = f"""
+              <p>
+                {threshold_txt}
+              </p>""" if threshold_txt else ""
+
+        model_sub = (f'<br><span class="normal-case font-normal">{names_txt}</span>' if multi_model else "")
+        model_gap_heads = "".join(
+            f'\n                    <th class="px-4 py-3" title="{esc(k)}">{esc(model_names[k])} '
+            f'({f"{esc(t)}, " if t and t not in model_names[k] else ""}eV)</th>'
+            for k, _, _, t in (screen_targets if multi_model else []))
+        model_gap_note = f"""
+                <div>
+                  <dt class="font-semibold text-slate-900">{names_txt} (eV)</dt>
+                  <dd>Each gap model's own band-gap prediction ({gap_models_txt}). The models target different
+                    levels of theory, so part of their difference is systematic rather than random. Band edges,
+                    Straddle and the margins are evaluated with each of these gaps separately.</dd>
+                </div>""" if multi_model else ""
         gap_source_txt = (f"Gaps from pretrained ML models. {gap_models_note.strip()}" if gap_models_note
                           else f"Gaps from pretrained ML models ({gap_models_txt}).")
         light_notes = f"""
@@ -2964,15 +3069,20 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                     <em>not screened</em>: the optical screen produced no result for this bulk.</dd>
                 </div>
                 <div>
-                  <dt class="font-semibold text-slate-900">Gap (eV)</dt>
+                  <dt class="font-semibold text-slate-900">{"Mean gap" if multi_model else "Gap"} (eV)</dt>
                   <dd>{gap_mean_txt} &plusmn; is the standard deviation
                     over these models (for two models, half their difference): model disagreement, not a
                     calibrated confidence interval. Hover the pointer over a value to see the per-model values.</dd>
-                </div>
+                </div>{model_gap_note}
                 <div>
                   <dt class="font-semibold text-slate-900">Straddle</dt>
-                  <dd><em>straddles</em>: both Red. margin and Ox. margin are at least {margin_txt}.
-                    <em>no</em>: at least one edge falls short. Hover the pointer over a verdict to see both margins.</dd>
+                  <dd>{(f"Evaluated separately with each model's gap. <em>straddles</em>: Red. margin and Ox. margin "
+                        f"are at least {margin_txt} for every model. <em>model-dependent</em>: true for some models "
+                        "only (named). <em>no</em>: at least one edge falls short for every model. Hover the pointer "
+                        "over a verdict to see each model's margins.") if multi_model else
+                       (f"<em>straddles</em>: both Red. margin and Ox. margin are at least {margin_txt}. "
+                        "<em>no</em>: at least one edge falls short. Hover the pointer over a verdict to see both "
+                        "margins.")}</dd>
                 </div>
                 <div>
                   <dt class="font-semibold text-slate-900">E<sub>CB</sub> / E<sub>VB</sub> (V<sub>RHE</sub>)</dt>
@@ -2980,27 +3090,24 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                     relation, as electrochemical potentials:
                     E<sub>CB</sub> = &chi; &minus; 4.5 eV &minus; E<sub>g</sub>/2 and E<sub>VB</sub> = E<sub>CB</sub> + E<sub>g</sub>,
                     with &chi; the geometric-mean Mulliken electronegativity of the composition and
-                    E<sub>g</sub> the Gap column. On this scale a more negative value is a higher-lying
-                    (more reducing) level. &chi; depends on composition only, so polymorphs differ only through
-                    their gap.</dd>
-                </div>
-                <div>
-                  <dt class="font-semibold text-slate-900">Req. min gap (eV)</dt>
-                  <dd>Smallest gap that could straddle at all: the width of the redox window plus
-                    {margin_txt} on each side, (U<sub>ox</sub> &minus; U<sub>red</sub>) + 2&times;margin. A bulk
-                    with a smaller gap cannot straddle, wherever its edges sit.</dd>
+                    E<sub>g</sub> {f"each model's gap ({names_txt})" if multi_model else "the Gap column"}. On this
+                    scale a more negative value is a higher-lying (more reducing) level. &chi; depends on composition
+                    only, so polymorphs differ only through their gap: every bulk shares the mid-gap level
+                    &chi; &minus; 4.5 eV.</dd>
                 </div>
                 <div>
                   <dt class="font-semibold text-slate-900">Red. margin (V)</dt>
                   <dd>U<sub>red</sub> &minus; E<sub>CB</sub>: how far the conduction-band edge sits above
                     (more negative than) the reduction level. Must be &ge; {margin_txt}; negative means the edge
-                    is too low to drive the reduction half-reaction.</dd>
+                    is too low to drive the reduction half-reaction.{f" Given per model ({names_txt})." if multi_model else ""}
+                    Values below {margin_txt} are in red.</dd>
                 </div>
                 <div>
                   <dt class="font-semibold text-slate-900">Ox. margin (V)</dt>
                   <dd>E<sub>VB</sub> &minus; U<sub>ox</sub>: how far the valence-band edge sits below
                     (more positive than) the oxidation level. Must be &ge; {margin_txt}; negative means the edge
-                    is too high to drive the oxidation half-reaction.</dd>
+                    is too high to drive the oxidation half-reaction.{f" Given per model ({names_txt})." if multi_model else ""}
+                    Values below {margin_txt} are in red.</dd>
                 </div>
               </dl>"""
 
@@ -3019,8 +3126,8 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 (E<sub>VB</sub>) below the oxidation level, each by at least the required
                 margin. Target for <strong>{esc(reaction)} / {esc(reaction_path)}</strong>:
                 {couple_bit}.
-                Here <strong>{n_light_cell}</strong> of {len(summaries)} bulk(s) straddle.
-              </p>
+                {straddle_count_txt}
+              </p>{threshold_html}
               <p class="text-sm text-slate-500">
                 {gap_source_txt}
               </p>
@@ -3037,13 +3144,12 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                 <thead class="bg-slate-50 text-slate-500 text-xs">
                   <tr>
                     <th class="px-4 py-3">Bulk</th>
-                    <th class="px-4 py-3">Gap (eV)</th>
+                    <th class="px-4 py-3">{"Mean gap" if multi_model else "Gap"} (eV)</th>{model_gap_heads}
                     <th class="px-4 py-3">Straddle</th>
-                    <th class="px-4 py-3">E<sub>CB</sub> (V<sub>RHE</sub>)</th>
-                    <th class="px-4 py-3">E<sub>VB</sub> (V<sub>RHE</sub>)</th>
-                    <th class="px-4 py-3">Req. min gap (eV)</th>
-                    <th class="px-4 py-3">Red. margin (V)</th>
-                    <th class="px-4 py-3">Ox. margin (V)</th>
+                    <th class="px-4 py-3">E<sub>CB</sub> (V<sub>RHE</sub>){model_sub}</th>
+                    <th class="px-4 py-3">E<sub>VB</sub> (V<sub>RHE</sub>){model_sub}</th>
+                    <th class="px-4 py-3">Red. margin (V){model_sub}</th>
+                    <th class="px-4 py-3">Ox. margin (V){model_sub}</th>
                   </tr>
                 </thead>
                 <tbody>{"".join(light_rows)}</tbody>
@@ -3172,10 +3278,9 @@ def render_html_report(chemical_formula, reaction, reaction_path, summaries=None
                     <th class="px-6 py-3" title="Materials Project id (MPDB-sourced bulks only)">MP ID</th>
                     <th class="px-6 py-3" title="± = standard deviation across the MLIP committee (model disagreement, not a DFT-calibrated interval)">E above hull (eV/atom)</th>
                     <th class="px-6 py-3" title="Surface slab models retained for this bulk; 0 does not mean the material has no stable surfaces">Surfaces retained</th>
-                    <th class="px-6 py-3" title="ML-predicted band gap; &plusmn; is the model spread">Gap (eV)</th>
                   </tr>
                 </thead>
-                <tbody>{"".join(bulk_rows) or f'<tr><td colspan="6" class="px-6 py-4 text-slate-400 italic">no bulk candidates found</td></tr>'}</tbody>
+                <tbody>{"".join(bulk_rows) or f'<tr><td colspan="5" class="px-6 py-4 text-slate-400 italic">no bulk candidates found</td></tr>'}</tbody>
               </table>
             </div>
             <div class="border-t bg-slate-50 px-6 py-4">{bulk_notes}

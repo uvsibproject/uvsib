@@ -103,3 +103,13 @@ def straddle_verdict(cb_vs_rhe, vb_vs_rhe, u_red, u_ox, margin=0.2):
         "margin_oxidation_V": margin_ox,
         "straddles": bool(margin_red >= margin and margin_ox >= margin),
     }
+
+
+def model_band_edges(edges_rhe, gap_values):
+    """``{model_key: {"cb", "vb"}}`` (V vs RHE): each gap model's own band edges.
+    Butler--Ginley puts every gap symmetrically around the composition-only
+    mid-gap level chi - E_e, so it is taken from the mean-gap ``edges_rhe`` and
+    each model's gap (negative ones clamped to 0) is centred on it."""
+    mid = 0.5 * (edges_rhe["cb"] + edges_rhe["vb"])
+    return {key: {"cb": round(mid - 0.5 * max(gap, 0.0), 4), "vb": round(mid + 0.5 * max(gap, 0.0), 4)}
+            for key, gap in (gap_values or {}).items()}
