@@ -82,17 +82,29 @@ NOXRR_PATHWAYS = {
         ],
     },
     "no3_to_nh3": {
-        # TODO(fix later): 0.88 is the NO3-/NH4+ standard potential, but this
-        # pathway's last step releases NH3(g). For consistency with the product
-        # (and the pin_total closure, G_total=-8*U_eq) recompute U_eq for the
-        # NO3- -> NH3(g) couple (~0.80 V from standard dGf; ~0.69 V aqueous-NH3
-        # per benchmarks/overpotential_refs/RECORDS.md) OR change the last step
-        # to produce NH4+. Mismatch biases this pathway's pinned eta by ~0.1 V.
-        "equilibrium_potential": 0.88,   # V vs RHE (NO3-/NH4+, standard) -- see TODO
+        # U_eq is the NO3-(aq)/NH3(g) couple, i.e. the product the last step
+        # releases:  NO3- + 9 H+ + 8 e- -> NH3(g) + 3 H2O(l),  0.80 V at pH 0
+        # (standard dGf). The former 0.88 V is the NH4+ couple (10 H+) and
+        # silently made the closed step *NH3 + H+ -> NH4+(aq). With 9 H+ per
+        # 8 e- the couple shifts -7.4 mV/pH on the RHE scale, so the 0.69 V vs
+        # RHE quoted in the eNO3RR literature (Halder, Sen & Roy, Commun. Chem.
+        # 9, 58 (2026)) is this same couple at pH 14, not an aqueous-NH3 value:
+        # subtract 0.11 V to compare with alkaline experiments.
+        #
+        # pin_step=0: the thermodynamic pin closes the nitrate-consuming step
+        # instead of the NH3 release. 'NO3' is a neutral gas-phase radical
+        # standing in for NO3-(aq) + H+ - 1/2 H2 (~2.3 eV apart by experimental
+        # dGf), so step 1 is the one that cannot be computed. Closing it puts
+        # the experimental nitrate reference (and the pH dependence of the
+        # couple) where it belongs and leaves *NH3 -> NH3(g) at its computed
+        # value; closing the release step put that residual on NH3 desorption,
+        # which then set eta for most sites.
+        "equilibrium_potential": 0.80,   # V vs RHE (NO3-/NH3(g), standard dGf, pH 0)
         "n_electrons": 8,
+        "pin_step": 0,
         "steps": [
             {},
-            {'*NO2': +1, 'H2O': +1, '*': -1, 'NO3': -1, 'H2': -1.0},  # NO3 + 2(H+ + e-) → *NO2 + H2O (2 e-)
+            {'*NO2': +1, 'H2O': +1, '*': -1, 'NO3': -1, 'H2': -1.0},  # NO3- + 2 H+ + e- → *NO2 + H2O (closed by the pin)
             {'*NO':  +1, 'H2O': +1, '*NO2': -1, 'H2': -1.0},          # *NO2 + 2(H+ + e-) → *NO + H2O (2 e-)
             {'*NOH': +1, '*NO':  -1, 'H2': -1/2},
             {'*N':   +1, 'H2O': +1, '*NOH': -1, 'H2': -1/2},
@@ -167,4 +179,5 @@ def calculate_noxrr_overpotential(adsorption_energies, pathway_name):
         pathway["steps"], local_energy, _ZPE,
         pathway["equilibrium_potential"], reduction=True,
         n_electrons=pathway["n_electrons"], pin_total=True,
+        pin_step=pathway.get("pin_step", -1),
     )

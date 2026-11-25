@@ -41,7 +41,8 @@ def load_zpe(reaction):
         return None
 
 def che_overpotential(steps, local_energy, zpe, equilibrium_potential,
-                      reduction=True, n_electrons=None, pin_total=False):
+                      reduction=True, n_electrons=None, pin_total=False,
+                      pin_step=-1):
     """Free-energy diagram and thermodynamic overpotential for a CHE pathway.
 
     This is the shared core for every electrochemical reaction calculator
@@ -68,6 +69,16 @@ def che_overpotential(steps, local_energy, zpe, equilibrium_potential,
     in step 1) -- that residual still needs the per-molecule electronic
     correction. The non-electrochemical "nominal" pathways (n_electrons == 0)
     are left unpinned.
+
+    ``pin_step`` chooses WHICH elementary step is back-solved (index into the
+    real steps, the leading ``{}`` marker not counted; default -1 = the final
+    release step, as above). The closed step is no longer a computed quantity:
+    it carries the whole reference residual of the pathway. So close the step
+    that holds the species the calculation cannot describe -- the release step
+    for O2 / CO / CH4-type products, but the nitrate-consuming FIRST step
+    (``pin_step=0``) for NO3- reduction, where NO3-(aq) is represented by a
+    neutral gas-phase radical. Closing the release step there loads the
+    nitrate residual onto product desorption and lets it set eta.
 
     ``steps`` is the list of elementary-reaction dictionaries from the
     pathway definition. Each dict maps a species to its **signed
@@ -112,7 +123,9 @@ def che_overpotential(steps, local_energy, zpe, equilibrium_potential,
     if pin_total and n_electrons:
         sign = -1.0 if reduction else 1.0
         g_total = sign * n_electrons * equilibrium_potential
-        dg_steps[-1] = g_total - sum(dg_steps[:-1])
+        closed = range(len(dg_steps))[pin_step]   # normalises -1; IndexError if out of range
+        dg_steps[closed] = g_total - sum(
+            dg for i, dg in enumerate(dg_steps) if i != closed)
 
     pds = max(dg_steps)
     overpotential = (pds + equilibrium_potential) if reduction \

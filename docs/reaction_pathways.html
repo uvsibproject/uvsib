@@ -379,7 +379,7 @@
           <tr><td><a class="rx-link" href="#noxrr">NOXRR</a></td><td class="eq">no_to_nh3_nhoh</td><td><span class="type-pill cathodic"><span class="dot"></span>cathodic</span></td><td class="num">5</td><td class="num">0.70</td><td>NO → NH₃, late N–O cleavage via *NHOH → *NH₂OH</td></tr>
           <tr><td><a class="rx-link" href="#noxrr">NOXRR</a></td><td class="eq">no_to_n2o</td><td><span class="type-pill cathodic"><span class="dot"></span>cathodic</span></td><td class="num">0</td><td class="num">−0.03</td><td>2 NO → N₂O, via *N2O2 dimer <span class="note-flag">non-electrochemical</span></td></tr>
           <tr><td><a class="rx-link" href="#noxrr">NOXRR</a></td><td class="eq">no2_to_no</td><td><span class="type-pill cathodic"><span class="dot"></span>cathodic</span></td><td class="num">2</td><td class="num">1.05</td><td>NO₂ → NO, deoxygenation via *O → *OH</td></tr>
-          <tr><td><a class="rx-link" href="#noxrr">NOXRR</a></td><td class="eq">no3_to_nh3</td><td><span class="type-pill cathodic"><span class="dot"></span>cathodic</span></td><td class="num">8</td><td class="num">0.88</td><td>NO₃⁻ → NH₃, via *NO₂ → *NO → *NOH → …→ *NH₃ <span class="note-flag">U_eq TODO</span></td></tr>
+          <tr><td><a class="rx-link" href="#noxrr">NOXRR</a></td><td class="eq">no3_to_nh3</td><td><span class="type-pill cathodic"><span class="dot"></span>cathodic</span></td><td class="num">8</td><td class="num">0.80</td><td>NO₃⁻ → NH₃, via *NO₂ → *NO → *NOH → …→ *NH₃</td></tr>
           <tr><td><a class="rx-link" href="#noxrr">NOXRR</a></td><td class="eq">no3_to_n2</td><td><span class="type-pill cathodic"><span class="dot"></span>cathodic</span></td><td class="num">5</td><td class="num">1.25</td><td>NO₃⁻ → N₂, via *NO₂ → *NO → *N, N–N coupling</td></tr>
           <tr><td><a class="rx-link" href="#nrr">NRR</a></td><td class="eq">distal</td><td><span class="type-pill cathodic"><span class="dot"></span>cathodic</span></td><td class="num">6</td><td class="num">0.092</td><td>N₂ → 2 NH₃, distal N hydrogenated &amp; released first</td></tr>
           <tr><td><a class="rx-link" href="#nrr">NRR</a></td><td class="eq">alternating</td><td><span class="type-pill cathodic"><span class="dot"></span>cathodic</span></td><td class="num">6</td><td class="num">0.092</td><td>N₂ → 2 NH₃, H atoms alternate between both N atoms</td></tr>
@@ -810,7 +810,7 @@
       <div class="pathway-head">
         <span class="pathway-name">no3_to_nh3</span>
         <span class="meta-chip"><b>8 e⁻</b></span>
-        <span class="meta-chip">U<sub>eq</sub> <b>0.88 V</b></span>
+        <span class="meta-chip">U<sub>eq</sub> <b>0.80 V</b></span>
       </div>
       <div class="table-scroll"><table class="steps">
         <thead><tr><th>Step</th><th>Elementary reaction</th><th>Description</th></tr></thead>
@@ -825,7 +825,7 @@
           <tr><td class="step-num">8</td><td class="eq">*NH₃ → NH₃(g) + *</td><td class="desc">Ammonia desorbs chemically, freeing the site.</td></tr>
         </tbody>
       </table></div>
-      <p class="pathway-footnote">U<sub>eq</sub> = 0.88 V is the NO₃⁻/NH₄⁺ standard potential, but this pathway's last step releases NH₃(g) — flagged in source as an open TODO; biases the pinned η by roughly 0.1 V.</p>
+      <p class="pathway-footnote">U<sub>eq</sub> = 0.80 V is the NO₃⁻/NH₃(g) couple at pH 0, matching the NH₃(g) released in step 8 (NH₄⁺ product: 0.88 V; pH 14: 0.69 V vs RHE, since the couple takes 9 H⁺ per 8 e⁻). The thermodynamic pin closes step 1 rather than the release step: NO₃⁻(aq) is represented by a neutral gas-phase radical, so that is the step fixed by experiment, and NH₃ desorption keeps its computed value.</p>
     </div>
 
     <div class="pathway">
